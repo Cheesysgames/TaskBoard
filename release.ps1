@@ -28,7 +28,8 @@ $result = Get-Content .\dist\selftest.log -Raw
 if (-not $result.StartsWith('PASS')) { throw "selftest: $result" }
 
 git add TaskBoard.csproj
-git commit -m "Release v$Version" | Out-Null
+git diff --cached --quiet
+if ($LASTEXITCODE) { git commit -m "Release v$Version" | Out-Null }
 git tag "v$Version"
 git push origin HEAD "v$Version"
 if ($LASTEXITCODE) { throw 'push failed' }
