@@ -209,7 +209,7 @@ static class Sched
     };
 }
 
-// Self-update from GitHub Releases (repo is private, so it needs a token: see Token()).
+// Self-update from GitHub Releases (public repo; a token is optional, see Token()).
 // release.ps1 publishes a release tagged vX.Y.Z with TaskBoard.exe attached.
 static class Updater
 {
@@ -245,9 +245,9 @@ static class Updater
     {
         var c = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
         c.DefaultRequestHeaders.UserAgent.ParseAdd("TaskBoard-Updater");
+        // Repo is public, so no token is needed; one is still used if present (higher rate limit).
         var token = Token();
-        if (token == null) throw new Exception($"no GitHub token (sign in with `gh auth login` or put one in {TokenFile})");
-        c.DefaultRequestHeaders.Authorization = new("Bearer", token);
+        if (token != null) c.DefaultRequestHeaders.Authorization = new("Bearer", token);
         return c;
     }
 
