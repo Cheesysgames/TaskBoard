@@ -601,14 +601,14 @@ class MainForm : Form
     readonly Dictionary<string, Card> cards = new();
     readonly System.Windows.Forms.Timer timer = new() { Interval = 3000 };
     readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 60 * 60 * 1000 };
-    readonly Pill add = new("+  Add server") { Primary = true }, admin = new("Run as admin"), gear = new("Settings"), update = new("Update");
+    readonly Pill add = new("+  Add server") { Primary = true }, admin = new("Run as admin"), gear = new("Settings"), update = new("Check for updates");
     readonly Segmented filter = new("All", "Tasks", "Services", "Startup apps"), view = new("Grid", "List");
     readonly SearchBox search = new();
     static readonly string[] Sources = { null, "task", "service", "startup" };
     Updater.Release pending;
     List<Item> last = new();
     string actionError = "";
-    bool loading;
+    bool loading, checking;
     (int running, int ok, int fail, int hidden) counts;
 
     public MainForm()
@@ -633,9 +633,7 @@ class MainForm : Form
         new ToolTip().SetToolTip(admin, "Shows tasks set up by an administrator and lets you start/stop services.");
         admin.Click += (_, _) => RestartAsAdmin();
         gear.Click += (_, _) => OpenSettings();
-        update.TextColor = Theme.Run;
-        update.Visible = false;
-        update.Click += async (_, _) => await ApplyUpdate();
+        update.Click += async (_, _) => { if (pending != null) await ApplyUpdate(); else await CheckUpdate(manual: true); };
         filter.Selected = settings.Filter;
         filter.Changed += () => { settings.Filter = filter.Selected; settings.Save(); Render(); };
         view.Selected = settings.View == "list" ? 1 : 0;
@@ -732,12 +730,29 @@ class MainForm : Form
     }
 
     // Quiet: a failed check (offline, rate limited) just leaves the button hidden.
-    async Task CheckUpdate()
+    // Hourly/at launch: quiet. From the button: says "Checking…", then "Up to date" or the error.
+    async Task CheckUpdate(bool manual = false)
     {
-        try { pending = await Updater.Check(); } catch { return; }
-        update.Visible = pending != null;
-        if (pending != null) { update.Text = $"Update to v{pending.Version.ToString(3)}"; update.Fit(); }
-        LayoutHeader();
+        if (checking) return;
+        checking = true;
+        void Show(string text, Color? color = null) { update.Text = text; update.TextColor = color; update.Fit(); LayoutHeader(); }
+        try
+        {
+            if (manual) { update.Enabled = false; Show("Checking…"); }
+            pending = await Updater.Check();
+            if (pending != null) Show($"Update to v{pending.Version.ToString(3)}", Theme.Run);
+            else if (manual)
+            {
+                Show("Up to date", Theme.Run);
+                await Task.Delay(2500);
+                if (pending == null) Show("Check for updates");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (manual) { Show("Check for updates"); ShowError("Couldn't check for updates: " + ex.Message); }
+        }
+        finally { update.Enabled = true; checking = false; }
     }
 
     async Task ApplyUpdate()
