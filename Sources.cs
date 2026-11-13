@@ -10,36 +10,25 @@ namespace TaskBoard;
 record Row(string Label, string Value, bool Alert = false);
 
 // One card on the board, whatever it came from. Source: task | service | startup.
+// Noise = updaters/helpers/Windows built-ins, hidden by default (Settings can change that).
 record Item(string Id, string Source, string Name, string Group, string Kind, string Label, Row[] Rows,
-    bool CanRun, bool CanStop, bool Enabled, bool CanDelete, string Tip, string IconExe);
+    bool CanRun, bool CanStop, bool Enabled, bool CanDelete, string Tip, string IconExe)
+{
+    public bool Noise { get; init; }
+}
 
 record Proc(int Pid, string Exe, string Cmd);
 
 static class Board
 {
-    static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TaskBoard");
-    static string HiddenFile => Path.Combine(Dir, "hidden.txt");
-    static HashSet<string> hidden;
-
     public static bool IsAdmin => new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
 
-    public static HashSet<string> Hidden
-    {
-        get
-        {
-            if (hidden != null) return hidden;
-            try { hidden = File.Exists(HiddenFile) ? File.ReadAllLines(HiddenFile).Where(l => l.Trim() != "").ToHashSet() : new(); }
-            catch { hidden = new(); }
-            return hidden;
-        }
-    }
+    static readonly Regex NoiseName = new(@"updat|elevation|crash|telemetry|helper|\bcontainer\b|frameview|maintenance|autolaunch|securityhealth",
+        RegexOptions.IgnoreCase);
 
-    public static void SetHidden(string id, bool hide)
-    {
-        if (hide) Hidden.Add(id); else Hidden.Remove(id);
-        Directory.CreateDirectory(Dir);
-        File.WriteAllLines(HiddenFile, Hidden.OrderBy(x => x));
-    }
+    public static bool IsNoise(Item i) =>
+        NoiseName.IsMatch(i.Name) // by name only: Discord etc. launch through an Update.exe
+        || (i.Source == "startup" && Services.IsMicrosoft(i.IconExe ?? ""));
 
     // Runs on a background thread. A broken source shows an error but doesn't blank the others.
     public static (List<Item> Items, List<string> Errors) Gather()
@@ -51,7 +40,7 @@ static class Board
         try { items.AddRange(Sched.List().Select(FromTask)); } catch (Exception e) { errors.Add("Task Scheduler: " + e.Message); }
         try { items.AddRange(Services.List()); } catch (Exception e) { errors.Add("services: " + e.Message); }
         try { items.AddRange(Startup.List(procs)); } catch (Exception e) { errors.Add("startup apps: " + e.Message); }
-        return (items.OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToList(), errors);
+        return (items.Select(i => i with { Noise = IsNoise(i) }).OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToList(), errors);
     }
 
     public static Item FromTask(TaskInfo t)
@@ -176,7 +165,7 @@ static class Services
 {
     static readonly Dictionary<string, bool> isMicrosoft = new(StringComparer.OrdinalIgnoreCase);
 
-    static bool Microsoft(string exe)
+    public static bool IsMicrosoft(string exe)
     {
         lock (isMicrosoft)
         {
@@ -199,7 +188,7 @@ static class Services
         {
             var path = Wmi.S(o, "PathName");
             var (exe, _) = Cmd.Split(path);
-            if (exe == "" || Microsoft(exe)) continue;
+            if (exe == "" || IsMicrosoft(exe)) continue;
             string name = Wmi.S(o, "Name"), state = Wmi.S(o, "State"), mode = Wmi.S(o, "StartMode");
             int pid = Convert.ToInt32(Wmi.P(o, "ProcessId") ?? 0);
             bool running = state == "Running", disabled = mode == "Disabled";
@@ -309,9 +298,25 @@ static class Startup
                     new[] { new Row("Starts", on ? "At sign-in" : "Not at sign-in"),
                             new Row("Process", hits.Count == 0 ? "—" : hits.Count == 1 ? $"PID {hits[0].Pid}" : $"{hits.Count} running"),
                             new Row("From", s.From) },
-                    hits.Count == 0, hits.Count > 0, on, true, $"{exe} {args}".Trim(), exe));
+                    hits.Count == 0, hits.Count > 0, on, true, $"{exe} {args}".Trim(), Launched(exe, args) ?? exe));
             }
         return list;
+    }
+
+    // "Update.exe --processStart Discord.exe": the real app sits next to the launcher (or in an app-x.y folder), use its icon.
+    public static string Launched(string exe, string args)
+    {
+        try
+        {
+            var m = Regex.Match(args ?? "", @"(?:^|[\s""])([^\s""\\/]+\.exe)\b", RegexOptions.IgnoreCase);
+            var dir = Path.GetDirectoryName(exe);
+            if (!m.Success || dir == null || !Directory.Exists(dir)) return null;
+            var name = m.Groups[1].Value;
+            var direct = Path.Combine(dir, name);
+            if (File.Exists(direct)) return direct;
+            return Directory.GetDirectories(dir).OrderByDescending(d => d).Select(d => Path.Combine(d, name)).FirstOrDefault(File.Exists);
+        }
+        catch { return null; }
     }
 
     public static void Do(string key, string act)

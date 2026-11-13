@@ -10,6 +10,7 @@
     <SelfContained>false</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <!-- Bumped by release.ps1; the updater compares this to the latest GitHub release tag. -->
+    <NoWarn>$(NoWarn);WFO1000</NoWarn> <!-- custom controls aren't used in a designer -->
     <Version>1.2.0</Version>
   </PropertyGroup>
 </Project>

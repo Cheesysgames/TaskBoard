@@ -24,8 +24,9 @@ static class Program
     static int ListToFile()
     {
         var (items, errors) = Board.Gather();
+        var settings = Settings.Load();
         var lines = errors.Select(e => "ERROR " + e)
-            .Concat(items.Select(i => $"{i.Source,-8} {i.Label,-12} {i.Name}  [{string.Join(" | ", i.Rows.Select(r => r.Label + ": " + r.Value))}]  {i.Tip.Replace("\n", " ")}"));
+            .Concat(items.Select(i => $"{(settings.IsHidden(i) ? "HIDDEN " : "       ")}{i.Source,-8} {i.Label,-12} {i.Name}  [{string.Join(" | ", i.Rows.Select(r => r.Label + ": " + r.Value))}]  {i.Tip.Replace("\n", " ")}"));
         File.WriteAllLines(Path.Combine(AppContext.BaseDirectory, "board.txt"), lines);
         return errors.Count == 0 ? 0 : 1;
     }
@@ -339,16 +340,21 @@ static class Theme
         Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 1) is int v && v == 0;
     static Color H(int rgb) => Color.FromArgb(255, Color.FromArgb(rgb));
     public static readonly Color
-        Bg = Dark ? H(0x111318) : H(0xF4F5F7),
-        Card = Dark ? H(0x1B1E25) : H(0xFFFFFF),
-        Text = Dark ? H(0xE7E9EE) : H(0x1D2129),
-        Muted = Dark ? H(0x9097A3) : H(0x6B7280),
-        Line = Dark ? H(0x2A2E37) : H(0xE3E5E9),
-        Ok = Dark ? H(0x22C55E) : H(0x16A34A),
-        Run = Dark ? H(0x60A5FA) : H(0x2563EB),
+        Bg = Dark ? H(0x0D0F14) : H(0xF2F3F6),
+        Card = Dark ? H(0x171A21) : H(0xFFFFFF),
+        Raised = Dark ? H(0x20242D) : H(0xF7F8FA),
+        Text = Dark ? H(0xECEEF2) : H(0x1A1D24),
+        Muted = Dark ? H(0x8E95A2) : H(0x6B7280),
+        Line = Dark ? H(0x2A2F3A) : H(0xE2E4E9),
+        Accent = Dark ? H(0x7C9CFF) : H(0x3B5BDB),
+        Ok = Dark ? H(0x7C9CFF) : H(0x3B5BDB),      // task finished fine
+        Run = Dark ? H(0x34D399) : H(0x059669),     // up and running
         Fail = Dark ? H(0xF87171) : H(0xDC2626),
         Warn = Dark ? H(0xFBBF24) : H(0xD97706),
-        Off = Dark ? H(0x6B7280) : H(0x9CA3AF);
+        Off = Dark ? H(0xA1A8B5) : H(0x6B7280);
+
+    // Translucent white on dark, black on light: for pills/buttons drawn over the blurred logo backdrops.
+    public static Color Wash(int alpha) => Dark ? Color.FromArgb(alpha, 255, 255, 255) : Color.FromArgb(alpha, 0, 0, 0);
 
     public static Color Of(string kind) => kind switch { "ok" => Ok, "running" => Run, "fail" => Fail, "warn" => Warn, _ => Off };
 
@@ -360,403 +366,6 @@ static class Theme
         var b = new Button { Text = text, FlatStyle = FlatStyle.Flat, BackColor = Card, ForeColor = Text, Cursor = Cursors.Hand, UseVisualStyleBackColor = false };
         b.FlatAppearance.BorderColor = Line;
         return b;
-    }
-}
-
-static class Icons
-{
-    static readonly Dictionary<string, Image> cache = new();
-    public static string LogoDir => Path.Combine(AppContext.BaseDirectory, "logos");
-    public static readonly string[] Exts = { ".png", ".jpg", ".jpeg", ".ico" };
-
-    public static void Forget(string path) => cache.Remove(path);
-
-    public static Image Get(Item i)
-    {
-        if (cache.TryGetValue(i.Id, out var img)) return img;
-        return cache[i.Id] = Custom(i.Name) ?? FromExe(i.IconExe) ?? Letter(i.Name);
-    }
-
-    static Image Custom(string name)
-    {
-        foreach (var ext in Exts)
-        {
-            var f = Path.Combine(LogoDir, name + ext);
-            if (!File.Exists(f)) continue;
-            try
-            {
-                if (ext == ".ico") return new Icon(f, 64, 64).ToBitmap();
-                using var tmp = new Bitmap(new MemoryStream(File.ReadAllBytes(f)));
-                return new Bitmap(tmp);
-            }
-            catch { }
-        }
-        return null;
-    }
-
-    static Image FromExe(string exe)
-    {
-        try { return (Icon.ExtractIcon(exe, 0, 64) ?? Icon.ExtractAssociatedIcon(exe))?.ToBitmap(); } catch { return null; }
-    }
-
-    static Image Letter(string name)
-    {
-        var b = new Bitmap(64, 64);
-        using var g = Graphics.FromImage(b);
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-        using var bg = new SolidBrush(Theme.Line);
-        g.FillEllipse(bg, 0, 0, 63, 63);
-        using var font = new Font("Segoe UI Semibold", 26f, GraphicsUnit.Pixel);
-        using var fg = new SolidBrush(Theme.Muted);
-        g.DrawString(name == "" ? "?" : name[..1].ToUpperInvariant(), font, fg, new RectangleF(0, 0, 64, 64),
-            new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
-        return b;
-    }
-
-    public static Icon AppIcon()
-    {
-        var b = new Bitmap(32, 32);
-        using (var g = Graphics.FromImage(b))
-        using (var br = new SolidBrush(Theme.Run))
-        {
-            foreach (var (x, y) in new[] { (2, 2), (17, 2), (2, 17), (17, 17) }) g.FillRectangle(br, x, y, 13, 13);
-        }
-        return Icon.FromHandle(b.GetHicon());
-    }
-}
-
-class Card : Panel
-{
-    public readonly string Id;
-    public event Action<string, string> Act; // (item id, action)
-
-    static readonly Font FName = new("Segoe UI Semibold", 10.5f), FSmall = new("Segoe UI", 8.5f),
-        FBody = new("Segoe UI", 9f), FStatus = new("Segoe UI Semibold", 9f);
-    readonly PictureBox logo = new() { SizeMode = PictureBoxSizeMode.Zoom };
-    readonly Label name, group, status;
-    readonly Label[] keys = new Label[3], vals = new Label[3];
-    readonly Button run, stop, toggle, remove;
-    readonly ToolTip tip = new();
-    readonly ToolStripMenuItem hideItem = new("Hide from board");
-    Color accent = Theme.Off;
-    bool enabled, canDelete, isHidden;
-
-    static int S(int px) => (int)Math.Round(px * MainForm.DpiScale);
-    static Rectangle R(int x, int y, int w, int h) => new(S(x), S(y), S(w), S(h));
-
-    public Card(string id)
-    {
-        Id = id;
-        Size = new Size(S(300), S(184));
-        Margin = new Padding(S(8));
-        BackColor = Theme.Card;
-        DoubleBuffered = true;
-
-        logo.Bounds = R(16, 22, 40, 40);
-        Controls.Add(logo);
-        name = L(66, 20, 132, 22, FName, Theme.Text);
-        group = L(66, 42, 132, 18, FSmall, Theme.Muted);
-        status = L(196, 22, 90, 20, FStatus, Theme.Text, ContentAlignment.MiddleRight);
-        for (int i = 0; i < 3; i++)
-        {
-            keys[i] = L(16, 74 + i * 21, 90, 20, FBody, Theme.Muted);
-            vals[i] = L(100, 74 + i * 21, 186, 20, FBody, Theme.Text, ContentAlignment.MiddleRight);
-        }
-
-        run = B("Run", 16, 62, "run");
-        stop = B("Stop", 82, 62, "stop");
-        toggle = B("Disable", 148, 74, "toggle");
-        remove = B("Delete", 226, 60, "remove");
-
-        hideItem.Click += (_, _) => Act?.Invoke(Id, isHidden ? "unhide" : "hide");
-        var menu = new ContextMenuStrip();
-        menu.Items.Add(hideItem);
-        ContextMenuStrip = menu;
-        foreach (Control c in Controls) if (c is not Button) c.ContextMenuStrip = menu;
-    }
-
-    Label L(int x, int y, int w, int h, Font f, Color c, ContentAlignment a = ContentAlignment.MiddleLeft)
-    {
-        var l = new Label { Bounds = R(x, y, w, h), Font = f, ForeColor = c, BackColor = Theme.Card, TextAlign = a, AutoEllipsis = true };
-        Controls.Add(l);
-        return l;
-    }
-
-    Button B(string text, int x, int w, string act)
-    {
-        var b = Theme.Btn(text);
-        b.Bounds = R(x, 146, w, 28);
-        b.Font = FBody;
-        b.Click += (_, _) => Act?.Invoke(Id, act switch
-        {
-            "toggle" => enabled ? "disable" : "enable",
-            "remove" => canDelete ? "delete" : (isHidden ? "unhide" : "hide"),
-            _ => act,
-        });
-        Controls.Add(b);
-        return b;
-    }
-
-    public void Bind(Item it, Image img, bool hidden)
-    {
-        enabled = it.Enabled;
-        canDelete = it.CanDelete;
-        isHidden = hidden;
-        accent = Theme.Of(it.Kind);
-        if (logo.Image != img) logo.Image = img;
-        name.Text = it.Name;
-        group.Text = hidden ? it.Group + " · hidden" : it.Group;
-        status.Text = "● " + it.Label;
-        status.ForeColor = accent;
-        for (int i = 0; i < 3; i++)
-        {
-            var r = i < it.Rows.Length ? it.Rows[i] : new Row("", "");
-            keys[i].Text = r.Label;
-            vals[i].Text = r.Value;
-            vals[i].ForeColor = r.Alert ? accent : Theme.Text;
-        }
-        run.Enabled = it.CanRun;
-        stop.Enabled = it.CanStop;
-        toggle.Text = it.Enabled ? "Disable" : "Enable";
-        remove.Text = it.CanDelete ? "Delete" : hidden ? "Unhide" : "Hide";
-        hideItem.Text = hidden ? "Unhide" : "Hide from board";
-        tip.SetToolTip(logo, it.Tip);
-        tip.SetToolTip(name, it.Tip);
-        Invalidate();
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        base.OnPaint(e);
-        using var border = new Pen(Theme.Line);
-        e.Graphics.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
-        using var bar = new SolidBrush(accent);
-        e.Graphics.FillRectangle(bar, 0, 0, Width, S(4));
-    }
-}
-
-class MainForm : Form
-{
-    public static float DpiScale = 1;
-    readonly FlowLayoutPanel grid = new() { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Bg };
-    readonly Label error = new() { Dock = DockStyle.Top, ForeColor = Theme.Fail, AutoEllipsis = true };
-    readonly Label nRunning = Count(Theme.Run), nOk = Count(Theme.Ok), nFail = Count(Theme.Fail);
-    readonly Dictionary<string, Card> cards = new();
-    readonly System.Windows.Forms.Timer timer = new() { Interval = 3000 };
-    readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 60 * 60 * 1000 };
-    readonly Button update = Theme.Btn("Update"), showHidden = Theme.Btn("Show hidden");
-    readonly ComboBox filter = new() { DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
-    static readonly string[] Filters = { "Everything", "Tasks", "Services", "Startup apps" };
-    Updater.Release pending;
-    List<Item> last = new();
-    string actionError = "";
-    bool loading, showingHidden;
-
-    static int S(int px) => (int)Math.Round(px * DpiScale);
-    static Label Count(Color c) => new() { AutoSize = true, ForeColor = c, Margin = new Padding(0, 0, 16, 0) };
-
-    public MainForm()
-    {
-        DpiScale = DeviceDpi / 96f;
-        Text = Board.IsAdmin ? "TaskBoard (admin)" : "TaskBoard";
-        Icon = Icons.AppIcon();
-        Font = new Font("Segoe UI", 9f);
-        BackColor = Theme.Bg;
-        ForeColor = Theme.Text;
-        ClientSize = new Size(S(1100), S(680));
-        StartPosition = FormStartPosition.CenterScreen;
-
-        var header = new Panel { Dock = DockStyle.Top, Height = S(64), Padding = new Padding(S(24), S(14), S(24), S(14)) };
-        var title = new Label { Text = "TaskBoard", Font = new Font("Segoe UI Semibold", 16f), AutoSize = true, Dock = DockStyle.Left };
-        var counts = new FlowLayoutPanel { Dock = DockStyle.Left, AutoSize = true, WrapContents = false, Padding = new Padding(S(20), S(10), 0, 0) };
-        counts.Controls.AddRange(new Control[] { nRunning, nOk, nFail });
-
-        var add = HeaderBtn(Theme.Btn("+  Add server"), 120);
-        add.Click += (_, _) => { using var f = new AddForm(); if (f.ShowDialog(this) == DialogResult.OK) Reload(); };
-
-        var admin = HeaderBtn(Theme.Btn("Run as admin"), 115);
-        admin.Visible = !Board.IsAdmin;
-        new ToolTip().SetToolTip(admin, "Shows tasks set up by an administrator and lets you start/stop services.");
-        admin.Click += (_, _) => RestartAsAdmin();
-
-        HeaderBtn(showHidden, 130);
-        showHidden.Click += (_, _) => { showingHidden = !showingHidden; Render(); };
-
-        filter.Items.AddRange(Filters);
-        filter.SelectedIndex = 0;
-        filter.BackColor = Theme.Card;
-        filter.ForeColor = Theme.Text;
-        filter.Dock = DockStyle.Fill;
-        filter.SelectedIndexChanged += (_, _) => Render();
-        var filterBox = new Panel { Dock = DockStyle.Right, Width = S(120), Padding = new Padding(0, S(4), 0, 0) };
-        filterBox.Controls.Add(filter);
-
-        HeaderBtn(update, 150);
-        update.ForeColor = Theme.Run;
-        update.Visible = false;
-        update.Click += async (_, _) => await ApplyUpdate();
-        var version = new Label { Text = "v" + Updater.Current.ToString(3), AutoSize = true, Dock = DockStyle.Right, ForeColor = Theme.Muted, Padding = new Padding(S(8), S(10), 0, 0) };
-
-        // Right-docked: first added sits furthest right.
-        foreach (var c in new Control[] { version, update, Gap(), add, Gap(), admin, Gap(), showHidden, Gap(), filterBox })
-            header.Controls.Add(c);
-        header.Controls.Add(counts);
-        header.Controls.Add(title);
-
-        error.Height = S(22);
-        error.Padding = new Padding(S(24), 0, S(24), 0);
-        grid.Padding = new Padding(S(16), S(4), S(16), S(16));
-
-        Controls.Add(grid);
-        Controls.Add(error);
-        Controls.Add(header);
-
-        timer.Tick += (_, _) => Reload();
-        updateTimer.Tick += async (_, _) => await CheckUpdate();
-        Load += async (_, _) => { Theme.TitleBar(this); Reload(); timer.Start(); updateTimer.Start(); await CheckUpdate(); };
-    }
-
-    Button HeaderBtn(Button b, int w)
-    {
-        b.Dock = DockStyle.Right;
-        b.Width = S(w);
-        b.Font = new Font("Segoe UI Semibold", 9.5f);
-        return b;
-    }
-
-    Panel Gap() => new() { Dock = DockStyle.Right, Width = S(8) };
-
-    void RestartAsAdmin()
-    {
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath) { UseShellExecute = true, Verb = "runas" });
-            Close();
-        }
-        catch (System.ComponentModel.Win32Exception) { } // said no to the UAC prompt
-    }
-
-    // Quiet: a failed check (offline, rate limited) just leaves the button hidden.
-    async Task CheckUpdate()
-    {
-        try { pending = await Updater.Check(); } catch { return; }
-        update.Visible = pending != null;
-        if (pending != null) update.Text = $"Update to v{pending.Version.ToString(3)}";
-    }
-
-    async Task ApplyUpdate()
-    {
-        if (pending == null) return;
-        update.Enabled = false;
-        update.Text = "Updating…";
-        try
-        {
-            await Updater.Apply(pending);
-            Updater.Restart();
-            Close();
-        }
-        catch (Exception ex)
-        {
-            actionError = "Update failed: " + ex.Message;
-            error.Text = actionError;
-            update.Enabled = true;
-            update.Text = $"Update to v{pending.Version.ToString(3)}";
-        }
-    }
-
-    // Reading services/processes takes a moment, so it happens off the UI thread.
-    async void Reload()
-    {
-        if (loading) return;
-        loading = true;
-        try
-        {
-            var (items, errors) = await Task.Run(Board.Gather);
-            last = items;
-            error.Text = actionError != "" ? actionError : errors.Count > 0 ? "Couldn't read " + string.Join("; ", errors) : "";
-            Render();
-        }
-        catch (Exception ex) { error.Text = "Refresh failed: " + ex.Message; }
-        finally { loading = false; }
-    }
-
-    void Render()
-    {
-        var source = new[] { null, "task", "service", "startup" }[Math.Max(filter.SelectedIndex, 0)];
-        int hiddenCount = last.Count(i => Board.Hidden.Contains(i.Id));
-        showHidden.Text = showingHidden ? "Hide hidden" : $"Show hidden ({hiddenCount})";
-        var list = last.Where(i => (source == null || i.Source == source) && (showingHidden || !Board.Hidden.Contains(i.Id))).ToList();
-
-        var ids = list.Select(i => i.Id).ToHashSet();
-        foreach (var gone in cards.Keys.Where(k => !ids.Contains(k)).ToList())
-        {
-            cards[gone].Dispose();
-            cards.Remove(gone);
-        }
-
-        grid.SuspendLayout();
-        for (int n = 0; n < list.Count; n++)
-        {
-            var it = list[n];
-            if (!cards.TryGetValue(it.Id, out var card))
-            {
-                card = cards[it.Id] = new Card(it.Id);
-                card.Act += OnAct;
-                grid.Controls.Add(card);
-            }
-            card.Bind(it, Icons.Get(it), Board.Hidden.Contains(it.Id));
-            grid.Controls.SetChildIndex(card, n);
-        }
-        grid.ResumeLayout();
-
-        var visible = list.Where(i => !Board.Hidden.Contains(i.Id)).ToList();
-        nRunning.Text = $"● {visible.Count(i => i.Kind == "running")} running";
-        nOk.Text = $"● {visible.Count(i => i.Kind == "ok")} ok";
-        nFail.Text = $"● {visible.Count(i => i.Kind == "fail")} failed";
-    }
-
-    void OnAct(string id, string act)
-    {
-        var it = last.FirstOrDefault(i => i.Id == id);
-        if (it == null) return;
-        var key = Board.Key(it);
-        try
-        {
-            switch (act)
-            {
-                case "hide": Board.SetHidden(id, true); break;
-                case "unhide": Board.SetHidden(id, false); break;
-                case "delete":
-                    var what = it.Source == "task"
-                        ? $"Remove \"{key.TrimStart('\\')}\" from Task Scheduler?\n\nThis doesn't stop it if it's running right now, and doesn't delete any files."
-                        : $"Stop \"{it.Name}\" from starting at sign-in by removing its startup entry?\n\nThis doesn't stop it if it's running right now, and doesn't uninstall anything.";
-                    if (MessageBox.Show(this, what, "Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-                    if (it.Source == "task") Sched.Delete(key); else Startup.Do(key, "delete");
-                    Icons.Forget(id);
-                    break;
-                default:
-                    if (it.Source == "service" && act == "disable" &&
-                        MessageBox.Show(this, $"Disable the \"{it.Name}\" service? It won't start until you enable it again.", "Disable service",
-                            MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-                    switch (it.Source)
-                    {
-                        case "task":
-                            if (act == "run") Sched.Run(key);
-                            else if (act == "stop") Sched.Stop(key);
-                            else Sched.SetEnabled(key, act == "enable");
-                            break;
-                        case "service": Services.Do(key, act); break;
-                        case "startup": Startup.Do(key, act); break;
-                    }
-                    break;
-            }
-            actionError = "";
-        }
-        catch (Exception ex) { actionError = $"{act} failed: {ex.Message}"; }
-        error.Text = actionError;
-        Render();
-        Reload();
     }
 }
 
@@ -967,6 +576,23 @@ static class SelfTest
             Check(Procs.Match(@"C:\Program Files\Plex\Plex Media Server.exe", "", procs).Single().Pid == 4, "match exe");
             Check(Procs.Match(@"C:\Users\x\Discord\Update.exe", "--processStart Discord.exe", procs).Single().Pid == 3, "match launcher");
             Check(Procs.Match(@"C:\pop\start.cmd", "", procs).Count == 0, "no false cmd match");
+
+            // Hiding: updaters hidden by default; a hand-picked choice beats the default either way.
+            Item I(string id, string name, bool noise = false) => new Item(id, "service", name, "", "off", "", Array.Empty<Row>(), false, false, true, false, "", "") with { Noise = noise };
+            var upd = I("service:gupd", "Google Updater Service", true);
+            var plex = I("startup:hkcu|Plex Media Server", "Plex Media Server");
+            Check(Board.IsNoise(I("x", "Google Updater Service")) && Board.IsNoise(I("x", "Discord System Helper")) && !Board.IsNoise(plex), "noise names");
+            var st = new Settings();
+            Check(st.IsHidden(upd) && !st.IsHidden(plex), "default hiding");
+            st.SetHidden(upd, false); st.SetHidden(plex, true);
+            Check(!st.IsHidden(upd) && st.IsHidden(plex) && st.Shown.Contains(upd.Id) && st.Hidden.Contains(plex.Id), "manual hiding");
+            st.SetHidden(upd, true);
+            Check(st.IsHidden(upd) && !st.Shown.Contains(upd.Id) && !st.Hidden.Contains(upd.Id), "back to default");
+            var round = System.Text.Json.JsonSerializer.Deserialize<Settings>(System.Text.Json.JsonSerializer.Serialize(st));
+            Check(round.Hidden.SequenceEqual(st.Hidden) && round.View == st.View && round.HideNoise, "settings json");
+
+            // Logo colour: a red logo tints red.
+            using (var red = new Bitmap(32, 32)) { using (var rg = Graphics.FromImage(red)) rg.Clear(Color.FromArgb(220, 30, 40)); var c = Icons.Dominant(red, "x"); Check(c.R > 150 && c.G < 90 && c.B < 90, $"dominant {c}"); }
 
             // Live read of every source, then a startup entry round trip in HKCU\...\Run.
             var (items, errors) = Board.Gather();
