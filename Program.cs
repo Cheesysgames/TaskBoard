@@ -641,6 +641,29 @@ static class SelfTest
             var round = System.Text.Json.JsonSerializer.Deserialize<Settings>(System.Text.Json.JsonSerializer.Serialize(st));
             Check(round.Hidden.SequenceEqual(st.Hidden) && round.View == st.View && round.HideNoise, "settings json");
 
+            // Merging: Tailscale's service + tray app become one card; same-source neighbours and node scripts don't.
+            Item P(string src, string id, string name, string exe, string kind = "running") =>
+                new Item(id, src, name, "", kind, kind, new[] { new Row("a", "1"), new Row("b", "2"), new Row("c", "3") }, kind != "running", kind == "running", true, src != "service", "", exe);
+            var merged = Board.Merge(new List<Item>
+            {
+                P("service", "service:Tailscale", "Tailscale", @"C:\Program Files\Tailscale\tailscaled.exe"),
+                P("startup", "startup:folder|Tailscale.lnk", "Tailscale", @"C:\Program Files\Tailscale\tailscale-ipn.exe", "off"),
+                P("service", "service:SplashRemote", "Splashtop Remote Service", @"C:\Splashtop\SRService.exe"),
+                P("service", "service:SplashUpd", "Splashtop Update Service", @"C:\Splashtop\SRUpdate.exe"),
+                P("task", "task:\\JarvisServer", "JarvisServer", @"C:\Program Files\nodejs\node.exe"),
+                P("startup", "startup:folder|Gateway.cmd", "OpenClaw Gateway", @"C:\Program Files\nodejs\node.exe"),
+                P("service", "service:Sonarr", "Sonarr", @"C:\ProgramData\Sonarr\bin\Sonarr.Console.exe"),
+                P("startup", "startup:hkcu|Sonarr Tray", "Sonarr Tray", @"C:\Other\Sonarr.exe", "off"),
+                P("service", "service:Claude", "Claude", @"C:\WindowsApps\Claude\claude.exe"),
+                P("startup", "startup:folder|ccum.lnk", "Claude Code Usage Monitor", @"C:\Users\x\ccum.exe"),
+            });
+            var ts = merged.Single(m => m.Name == "Tailscale");
+            Check(merged.Count == 8, "merge count " + merged.Count);
+            Check(ts.Id == "service:Tailscale" && ts.Parts.Length == 2 && ts.Group == "Service + Startup app" && ts.CanRun && ts.CanStop && !ts.CanDelete
+                && ts.Rows[2].Label == "Tray app" && ts.Has("startup") && ts.Has("service"), "merged tailscale");
+            Check(merged.Single(m => m.Id == "service:Sonarr").Parts.Length == 2, "merged by name");
+            Check(merged.Count(m => m.Name.StartsWith("Splashtop")) == 2 && merged.Single(m => m.Id == "task:\\JarvisServer").Parts == null, "no false merges");
+
             // Logo colour: a red logo tints red.
             using (var red = new Bitmap(32, 32)) { using (var rg = Graphics.FromImage(red)) rg.Clear(Color.FromArgb(220, 30, 40)); var c = Icons.Dominant(red, "x"); Check(c.R > 150 && c.G < 90 && c.B < 90, $"dominant {c}"); }
 

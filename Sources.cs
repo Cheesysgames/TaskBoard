@@ -15,6 +15,8 @@ record Item(string Id, string Source, string Name, string Group, string Kind, st
     bool CanRun, bool CanStop, bool Enabled, bool CanDelete, string Tip, string IconExe)
 {
     public bool Noise { get; init; }
+    public Item[] Parts { get; init; } // set when one app's service/task/startup pieces are shown as one card
+    public bool Has(string source) => Source == source || (Parts?.Any(p => p.Source == source) ?? false);
 }
 
 record Proc(int Pid, string Exe, string Cmd);
@@ -40,7 +42,72 @@ static class Board
         try { items.AddRange(Sched.List().Select(FromTask)); } catch (Exception e) { errors.Add("Task Scheduler: " + e.Message); }
         try { items.AddRange(Services.List()); } catch (Exception e) { errors.Add("services: " + e.Message); }
         try { items.AddRange(Startup.List(procs)); } catch (Exception e) { errors.Add("startup apps: " + e.Message); }
-        return (items.Select(i => i with { Noise = IsNoise(i) }).OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToList(), errors);
+        var merged = Merge(items.Select(i => i with { Noise = IsNoise(i) }).ToList());
+        return (merged.OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToList(), errors);
+    }
+
+    // One app often installs twice: a service (the engine) plus a startup app (its tray icon), e.g. Tailscale.
+    // Pieces from different sources that share a name or install folder become one card.
+    static readonly Regex Filler = new(@"\b(service|server|tray|app|daemon|agent|gui|ipn)\b|[^a-z0-9]", RegexOptions.IgnoreCase);
+    static readonly string[] Interpreters = { "node.exe", "python.exe", "pythonw.exe", "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe", "wscript.exe" };
+
+    public static string Norm(string name) => Filler.Replace(Regex.Replace(name ?? "", @"\(.*?\)", ""), "").ToLowerInvariant();
+
+    static string Folder(Item i)
+    {
+        var exe = i.IconExe ?? "";
+        if (exe == "" || Interpreters.Contains(Path.GetFileName(exe).ToLowerInvariant())) return null; // node.exe's folder says nothing
+        return Path.GetDirectoryName(exe)?.TrimEnd('\\').ToLowerInvariant();
+    }
+
+    public static bool SameApp(Item a, Item b)
+    {
+        if (a.Source == b.Source || a.Noise != b.Noise) return false; // an updater never folds into the real app
+        string na = Norm(a.Name), nb = Norm(b.Name);
+        if (na.Length >= 3 && na == nb) return true; // exact: "Claude" is not "Claude Code Usage Monitor"
+        var fa = Folder(a);
+        return fa != null && fa == Folder(b);
+    }
+
+    public static List<Item> Merge(List<Item> items)
+    {
+        int Rank(Item i) => i.Source switch { "service" => 0, "task" => 1, _ => 2 }; // the engine leads
+        var used = new HashSet<Item>();
+        var result = new List<Item>();
+        foreach (var lead in items.OrderBy(Rank))
+        {
+            if (used.Contains(lead)) continue;
+            used.Add(lead);
+            var extras = items.Where(o => !used.Contains(o) && Rank(o) > Rank(lead) && SameApp(lead, o))
+                .GroupBy(o => o.Source).Select(g => g.First()).ToList();
+            foreach (var e in extras) used.Add(e);
+            result.Add(extras.Count == 0 ? lead : Combine(lead, extras));
+        }
+        return result;
+    }
+
+    static string Word(string source) => source switch { "service" => "Service", "task" => "Task", _ => "Startup app" };
+
+    static Item Combine(Item lead, List<Item> extras)
+    {
+        var parts = new[] { lead }.Concat(extras).ToArray();
+        var rows = lead.Rows.Take(2).ToList();
+        foreach (var e in extras.Take(3 - rows.Count))
+            rows.Add(new Row(e.Source == "startup" ? "Tray app" : Word(e.Source), e.Label, e.Kind is "fail" or "warn"));
+        return lead with
+        {
+            Name = extras.FirstOrDefault(e => e.Source == "startup")?.Name ?? lead.Name, // the tray app has the name people know ("GlobalProtect", not "PanGPS")
+            Group = string.Join(" + ", parts.Select(p => Word(p.Source))),
+            Rows = rows.ToArray(),
+            CanRun = parts.Any(p => p.CanRun),
+            CanStop = parts.Any(p => p.CanStop),
+            Enabled = parts.Any(p => p.Enabled),
+            CanDelete = false,
+            Tip = string.Join("\n\n", parts.Select(p => $"{Word(p.Source)}: {p.Tip}")),
+            IconExe = extras.FirstOrDefault(e => e.Source == "startup")?.IconExe ?? lead.IconExe, // the tray app has the nicer icon
+            Noise = parts.All(p => p.Noise),
+            Parts = parts,
+        };
     }
 
     public static Item FromTask(TaskInfo t)

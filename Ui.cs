@@ -814,7 +814,7 @@ class MainForm : Form
         counts = (visible.Count(i => i.Kind == "running"), visible.Count(i => i.Kind == "ok"), visible.Count(i => i.Kind == "fail"), last.Count - visible.Count);
         header.Invalidate();
 
-        var list = visible.Where(i => (source == null || i.Source == source)
+        var list = visible.Where(i => (source == null || i.Has(source))
             && (q == "" || i.Name.Contains(q, StringComparison.OrdinalIgnoreCase) || i.Tip.Contains(q, StringComparison.OrdinalIgnoreCase))).ToList();
 
         var ids = list.Select(i => i.Id).ToHashSet();
@@ -862,18 +862,25 @@ class MainForm : Form
                     Icons.Forget(id);
                     break;
                 default:
-                    if (it.Source == "service" && act == "disable" &&
-                        MessageBox.Show(this, $"Disable the \"{it.Name}\" service? It won't start until you enable it again.", "Disable service",
+                    if (it.Has("service") && act == "disable" &&
+                        MessageBox.Show(this, $"Disable \"{it.Name}\"? It won't start until you enable it again.", "Disable",
                             MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-                    switch (it.Source)
+                    // A merged card acts on each piece that the action makes sense for (start what's stopped, stop what's running).
+                    foreach (var part in it.Parts ?? new[] { it })
                     {
-                        case "task":
-                            if (act == "run") Sched.Run(key);
-                            else if (act == "stop") Sched.Stop(key);
-                            else Sched.SetEnabled(key, act == "enable");
-                            break;
-                        case "service": Services.Do(key, act); break;
-                        case "startup": Startup.Do(key, act); break;
+                        if ((act == "run" && !part.CanRun) || (act == "stop" && !part.CanStop)) continue;
+                        if ((act == "enable" && part.Enabled) || (act == "disable" && !part.Enabled)) continue;
+                        var pk = Board.Key(part);
+                        switch (part.Source)
+                        {
+                            case "task":
+                                if (act == "run") Sched.Run(pk);
+                                else if (act == "stop") Sched.Stop(pk);
+                                else Sched.SetEnabled(pk, act == "enable");
+                                break;
+                            case "service": Services.Do(pk, act); break;
+                            case "startup": Startup.Do(pk, act); break;
+                        }
                     }
                     break;
             }
@@ -968,7 +975,7 @@ class SettingsForm : Form
         Load += (_, _) => { Theme.TitleBar(this); Fill(); };
     }
 
-    static string Kind(Item i) => i.Source switch { "task" => "Task", "service" => "Service", _ => "Startup app" };
+    static string Kind(Item i) => i.Parts != null ? i.Group : i.Source switch { "task" => "Task", "service" => "Service", _ => "Startup app" };
 
     void Fill()
     {
