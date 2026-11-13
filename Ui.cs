@@ -273,6 +273,9 @@ class Pill : Control
     bool hover;
     public bool Primary { get; set; }
     public Color? TextColor { get; set; }
+    // Icon-only round button (Segoe MDL2 glyph) when set; plain text pill when null.
+    public string Glyph { get; set; }
+    static readonly Font GlyphFont = new("Segoe MDL2 Assets", 11f);
 
     public Pill(string text)
     {
@@ -284,7 +287,7 @@ class Pill : Control
         Height = MainForm.S(34);
     }
 
-    public void Fit() => Width = Draw.Measure(Text, Font) + MainForm.S(30);
+    public void Fit() { Width = Glyph != null ? Height : Draw.Measure(Text, Font) + MainForm.S(26); Invalidate(); }
     protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
     protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
@@ -297,97 +300,8 @@ class Pill : Control
         var fill = Primary ? (hover ? Draw.Mix(Theme.Accent, Color.White, 0.12) : Theme.Accent) : (hover ? Theme.Wash(28) : Theme.Wash(14));
         Draw.Fill(g, r, Height / 2f, fill);
         var fg = !Enabled ? Theme.Muted : Primary ? Color.White : TextColor ?? Theme.Text;
-        Draw.Text(g, Text, Font, ClientRectangle, fg, TextFormatFlags.HorizontalCenter);
-    }
-}
-
-// "All | Tasks | Services | Startup" style switch.
-class Segmented : Control
-{
-    readonly string[] options;
-    int selected, hover = -1;
-    public event Action Changed;
-
-    public Segmented(params string[] options)
-    {
-        this.options = options;
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
-        BackColor = Color.Transparent;
-        Font = new Font("Segoe UI Semibold", 9f);
-        Height = MainForm.S(34);
-        Cursor = Cursors.Hand;
-        Width = options.Sum(o => Draw.Measure(o, Font) + MainForm.S(26)) + MainForm.S(8);
-    }
-
-    public int Selected { get => selected; set { selected = Math.Clamp(value, 0, options.Length - 1); Invalidate(); } }
-
-    IEnumerable<(int i, RectangleF r)> Segs()
-    {
-        float x = MainForm.S(4);
-        for (int i = 0; i < options.Length; i++)
-        {
-            float w = Draw.Measure(options[i], Font) + MainForm.S(26);
-            yield return (i, new RectangleF(x, MainForm.S(4), w, Height - MainForm.S(8)));
-            x += w;
-        }
-    }
-
-    protected override void OnMouseMove(MouseEventArgs e)
-    {
-        var h = Segs().FirstOrDefault(s => s.r.Contains(e.Location), (-1, default)).i;
-        if (h != hover) { hover = h; Invalidate(); }
-    }
-    protected override void OnMouseLeave(EventArgs e) { hover = -1; Invalidate(); }
-    protected override void OnMouseClick(MouseEventArgs e)
-    {
-        var h = Segs().FirstOrDefault(s => s.r.Contains(e.Location), (-1, default)).i;
-        if (h >= 0 && h != selected) { Selected = h; Changed?.Invoke(); }
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        Draw.Smooth(g);
-        Draw.Fill(g, new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), Height / 2f, Theme.Wash(12));
-        foreach (var (i, r) in Segs())
-        {
-            if (i == selected) Draw.Fill(g, r, r.Height / 2, Theme.Dark ? Theme.Raised : Color.White);
-            else if (i == hover) Draw.Fill(g, r, r.Height / 2, Theme.Wash(10));
-            Draw.Text(g, options[i], Font, Rectangle.Round(r), i == selected ? Theme.Text : Theme.Muted, TextFormatFlags.HorizontalCenter);
-        }
-    }
-}
-
-// Rounded search field.
-class SearchBox : Panel
-{
-    public readonly TextBox Box = new() { BorderStyle = BorderStyle.None, PlaceholderText = "Search", Font = new Font("Segoe UI", 10f) };
-
-    public SearchBox()
-    {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-        Height = MainForm.S(34);
-        Box.BackColor = Draw.Mix(Theme.Bg, Theme.Dark ? Color.White : Color.Black, 0.055);
-        Box.ForeColor = Theme.Text;
-        Controls.Add(Box);
-        Resize += (_, _) =>
-        {
-            Box.Width = Width - MainForm.S(46);
-            Box.Location = new Point(MainForm.S(32), (Height - Box.Height) / 2);
-        };
-        Click += (_, _) => Box.Focus();
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.Clear(Parent?.BackColor ?? Theme.Bg);
-        Draw.Smooth(g);
-        Draw.Fill(g, new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), Height / 2f, Box.BackColor);
-        using var pen = new Pen(Theme.Muted, MainForm.S(2) * 0.75f);
-        float cx = MainForm.S(16), cy = Height / 2f - MainForm.S(1), rad = MainForm.S(5);
-        g.DrawEllipse(pen, cx - rad, cy - rad, rad * 2, rad * 2);
-        g.DrawLine(pen, cx + rad * 0.7f, cy + rad * 0.7f, cx + rad * 1.6f, cy + rad * 1.6f);
+        if (Glyph != null) Draw.Text(g, Glyph, GlyphFont, ClientRectangle, fg, TextFormatFlags.HorizontalCenter);
+        else Draw.Text(g, Text, Font, ClientRectangle, fg, TextFormatFlags.HorizontalCenter);
     }
 }
 
@@ -589,22 +503,225 @@ class Board2 : FlowLayoutPanel
     }
 }
 
+class MenuColors : ProfessionalColorTable
+{
+    static Color Bg => Theme.Raised;
+    static Color Sel => Draw.Mix(Theme.Raised, Theme.Text, 0.12);
+    public override Color ToolStripDropDownBackground => Bg;
+    public override Color ImageMarginGradientBegin => Bg;
+    public override Color ImageMarginGradientMiddle => Bg;
+    public override Color ImageMarginGradientEnd => Bg;
+    public override Color MenuBorder => Theme.Line;
+    public override Color MenuItemBorder => Sel;
+    public override Color MenuItemSelected => Sel;
+    public override Color MenuItemSelectedGradientBegin => Sel;
+    public override Color MenuItemSelectedGradientEnd => Sel;
+    public override Color SeparatorDark => Theme.Line;
+    public override Color SeparatorLight => Theme.Line;
+}
+
+// Grid view: compact tiles in groups, sized to fit the window so nothing scrolls (down to a minimum size).
+// Click or right-click a tile for its actions; hover for details.
+class TileBoard : ScrollableControl
+{
+    public event Action<string, string> Act;
+    static readonly string[] Order = { "Services", "Scheduled tasks", "Startup apps" };
+    static readonly Font FName = new("Segoe UI Semibold", 9.5f), FLine = new("Segoe UI", 8.25f), FHead = new("Segoe UI Semibold", 8f);
+
+    List<(string Title, List<Item> Items)> groups = new();
+    readonly List<(Rectangle R, Item It)> tiles = new();
+    readonly List<(Rectangle R, string Text)> heads = new();
+    Item hover;
+    readonly ToolTip tip = new() { InitialDelay = 500, AutoPopDelay = 15000 };
+
+    [System.Runtime.InteropServices.DllImport("uxtheme.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int SetWindowTheme(IntPtr hwnd, string app, string idList);
+
+    static int S(int px) => MainForm.S(px);
+
+    public TileBoard()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        BackColor = Theme.Bg;
+        AutoScroll = true;
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        if (Theme.Dark) SetWindowTheme(Handle, "DarkMode_Explorer", null);
+    }
+
+    public static string GroupOf(Item i) => i.Source switch { "service" => "Services", "task" => "Scheduled tasks", _ => "Startup apps" };
+
+    public void SetItems(List<Item> items)
+    {
+        groups = Order.Select(t => (t, items.Where(i => GroupOf(i) == t).ToList())).Where(g => g.Item2.Count > 0).ToList();
+        if (hover != null) hover = items.FirstOrDefault(i => i.Id == hover.Id);
+        DoLayout();
+        Invalidate();
+    }
+
+    protected override void OnResize(EventArgs e) { base.OnResize(e); DoLayout(); Invalidate(); }
+
+    // Pick the column count and tile height that fit everything: as many columns as the width allows,
+    // then tiles as tall as the height allows (tile width can shrink to make more columns if needed).
+    void DoLayout()
+    {
+        tiles.Clear();
+        heads.Clear();
+        if (groups.Count == 0) { AutoScrollMinSize = Size.Empty; return; }
+        int pad = S(12), gap = S(8), headH = S(26), groupGap = S(6);
+        int W = ClientSize.Width - pad * 2, H = ClientSize.Height - pad * 2;
+        int G = groups.Count;
+
+        int cols = 1, tileH = S(44);
+        foreach (var minW in new[] { 190, 170, 150, 135 })
+        {
+            cols = Math.Max(1, (W + gap) / (S(minW) + gap));
+            int rows = groups.Sum(g => (g.Items.Count + cols - 1) / cols);
+            tileH = (H - G * (headH + groupGap) - rows * gap) / Math.Max(rows, 1);
+            if (tileH >= S(46)) break;
+        }
+        tileH = Math.Clamp(tileH, S(44), S(70));
+        int tileW = (W - (cols - 1) * gap) / cols;
+
+        int y = pad;
+        foreach (var (title, items) in groups)
+        {
+            heads.Add((new Rectangle(pad, y, W, headH), $"{title.ToUpperInvariant()}   {items.Count}"));
+            y += headH;
+            for (int i = 0; i < items.Count; i++)
+                tiles.Add((new Rectangle(pad + i % cols * (tileW + gap), y + i / cols * (tileH + gap), tileW, tileH), items[i]));
+            y += (items.Count + cols - 1) / cols * (tileH + gap) + groupGap;
+        }
+        int total = y + pad - groupGap;
+        AutoScrollMinSize = total > ClientSize.Height ? new Size(0, total) : Size.Empty;
+    }
+
+    static string Detail(Item it)
+    {
+        var alert = it.Rows.FirstOrDefault(r => r.Alert);
+        if (alert != null) return alert.Value;
+        var row = it.Source == "task" ? it.Rows.FirstOrDefault(r => r.Label == "Next run") : it.Rows.FirstOrDefault(r => r.Label == "Process");
+        if (row == null || row.Value == "—") return null;
+        return it.Source == "task" ? "next " + row.Value : row.Value;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Theme.Bg);
+        Draw.Smooth(g);
+        g.TranslateTransform(AutoScrollPosition.X, AutoScrollPosition.Y);
+
+        foreach (var (r, text) in heads)
+        {
+            Draw.Text(g, text, FHead, new Rectangle(r.X + S(2), r.Y, r.Width, r.Height - S(4)), Theme.Muted);
+            int tw = Draw.Measure(text, FHead) + S(12);
+            using var line = new Pen(Theme.Line);
+            g.DrawLine(line, r.X + tw, r.Y + (r.Height - S(4)) / 2, r.Right, r.Y + (r.Height - S(4)) / 2);
+        }
+
+        foreach (var (r, it) in tiles) PaintTile(g, r, it);
+    }
+
+    void PaintTile(Graphics g, Rectangle r, Item it)
+    {
+        var rf = new RectangleF(r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1);
+        using (var path = Draw.Round(rf, S(10)))
+        {
+            using var tex = new TextureBrush(Icons.Backdrop(it, r.Size, true), WrapMode.Clamp);
+            tex.TranslateTransform(r.X, r.Y);
+            g.FillPath(tex, path);
+            var edge = it.Kind == "fail" ? Color.FromArgb(170, Theme.Fail)
+                : hover?.Id == it.Id ? Theme.Wash(70) : Color.FromArgb(Theme.Dark ? 55 : 80, Icons.Palette(it));
+            using var pen = new Pen(edge, hover?.Id == it.Id || it.Kind == "fail" ? 1.5f : 1f);
+            g.DrawPath(pen, path);
+        }
+
+        int logo = Math.Min(r.Height - S(18), S(34));
+        var lr = new Rectangle(r.X + S(10), r.Y + (r.Height - logo) / 2, logo, logo);
+        Draw.Fill(g, lr, S(8), Theme.Wash(16));
+        var img = Icons.Get(it);
+        if (img != null) g.DrawImage(img, Rectangle.Inflate(lr, -S(4), -S(4)));
+
+        int tx = lr.Right + S(10), tw = r.Right - tx - S(8);
+        int mid = r.Y + r.Height / 2;
+        Draw.Text(g, it.Name, FName, new Rectangle(tx, mid - S(19), tw, S(19)), Theme.Text);
+
+        var c = Theme.Of(it.Kind);
+        using (var dot = new SolidBrush(c)) g.FillEllipse(dot, tx, mid + S(5), S(6), S(6));
+        int lx = tx + S(10);
+        int lw = Math.Min(Draw.Measure(it.Label, FLine), tw - S(10));
+        Draw.Text(g, it.Label, FLine, new Rectangle(lx - S(3), mid, lw + S(2), S(16)), c);
+        var detail = Detail(it);
+        if (detail != null)
+            Draw.Text(g, "· " + detail, FLine, new Rectangle(lx + lw - S(2), mid, tw - S(10) - lw + S(2), S(16)), it.Rows.Any(x => x.Alert) ? c : Theme.Muted);
+    }
+
+    Item At(Point p)
+    {
+        p.Offset(-AutoScrollPosition.X, -AutoScrollPosition.Y);
+        return tiles.FirstOrDefault(t => t.R.Contains(p)).It;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var h = At(e.Location);
+        if (h?.Id == hover?.Id) return;
+        hover = h;
+        Cursor = h != null ? Cursors.Hand : Cursors.Default;
+        tip.SetToolTip(this, h == null ? "" : $"{h.Name}\n{h.Group}\n\n{string.Join("\n", h.Rows.Select(x => $"{x.Label}: {x.Value}"))}\n\nClick for actions");
+        Invalidate();
+    }
+
+    protected override void OnMouseLeave(EventArgs e) { hover = null; Invalidate(); base.OnMouseLeave(e); }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        base.OnMouseClick(e);
+        var it = At(e.Location);
+        if (it == null) return;
+        tip.Hide(this);
+        var menu = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new MenuColors()), ShowImageMargin = false, Font = new Font("Segoe UI", 9.5f) };
+        menu.Items.Add(new ToolStripLabel(it.Name) { Font = new Font("Segoe UI Semibold", 9.5f), ForeColor = Theme.Text });
+        menu.Items.Add(new ToolStripLabel($"{it.Group} · {it.Label}") { ForeColor = Theme.Muted });
+        menu.Items.Add(new ToolStripSeparator());
+        void Add(string text, string act, bool on = true)
+        {
+            var mi = new ToolStripMenuItem(text) { Enabled = on, ForeColor = Theme.Text };
+            mi.Click += (_, _) => Act?.Invoke(it.Id, act);
+            menu.Items.Add(mi);
+        }
+        Add("Run", "run", it.CanRun);
+        Add("Stop", "stop", it.CanStop);
+        Add(it.Enabled ? "Disable" : "Enable", it.Enabled ? "disable" : "enable");
+        menu.Items.Add(new ToolStripSeparator());
+        if (it.CanDelete) Add("Delete…", "delete");
+        Add("Hide from board", "hide");
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        menu.Show(this, e.Location);
+    }
+}
+
 class MainForm : Form
 {
     public static float DpiScale = 1;
     public static int S(int px) => (int)Math.Round(px * DpiScale);
 
+    const string GUpdate = "", GSettings = "", GAdd = "", GAdmin = "", GList = "", GTiles = "";
     readonly Settings settings = Settings.Load();
+    readonly TileBoard tiles = new() { Dock = DockStyle.Fill };
     readonly Board2 grid = new() { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Bg };
     readonly Label error = new() { Dock = DockStyle.Top, ForeColor = Theme.Fail, AutoEllipsis = true, Visible = false };
     readonly Panel header = new() { Dock = DockStyle.Top, BackColor = Theme.Bg };
     readonly Dictionary<string, Card> cards = new();
     readonly System.Windows.Forms.Timer timer = new() { Interval = 3000 };
     readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 60 * 60 * 1000 };
-    readonly Pill add = new("+  Add server") { Primary = true }, admin = new("Run as admin"), gear = new("Settings"), update = new("Check for updates");
-    readonly Segmented filter = new("All", "Tasks", "Services", "Startup apps"), view = new("Grid", "List");
-    readonly SearchBox search = new();
-    static readonly string[] Sources = { null, "task", "service", "startup" };
+    readonly Pill add = new("") { Primary = true, Glyph = GAdd }, admin = new("") { Glyph = GAdmin }, gear = new("") { Glyph = GSettings },
+        update = new("") { Glyph = GUpdate }, view = new("");
+    readonly ToolTip tips = new();
     Updater.Release pending;
     List<Item> last = new();
     string actionError = "";
@@ -619,37 +736,50 @@ class MainForm : Form
         Font = new Font("Segoe UI", 9f);
         BackColor = Theme.Bg;
         ForeColor = Theme.Text;
-        StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(S(760), S(480));
-        ClientSize = settings.Width > 0 ? new Size(Math.Max(settings.Width, S(760)), Math.Max(settings.Height, S(480))) : new Size(S(1180), S(760));
+        MinimumSize = new Size(S(420), S(300));
+        if (settings.Width > 0)
+        {
+            StartPosition = FormStartPosition.CenterScreen;
+            ClientSize = new Size(Math.Max(settings.Width, S(420)), Math.Max(settings.Height, S(300)));
+        }
+        else
+        {
+            // First run: a quarter of the screen, top-right corner.
+            var wa = Screen.PrimaryScreen.WorkingArea;
+            StartPosition = FormStartPosition.Manual;
+            Bounds = new Rectangle(wa.Left + wa.Width / 2, wa.Top, wa.Width / 2, wa.Height / 2);
+        }
         if (settings.Maximized) WindowState = FormWindowState.Maximized;
 
-        header.Height = S(124);
+        header.Height = S(54);
         header.Paint += PaintHeader;
         header.Resize += (_, _) => LayoutHeader();
 
+        foreach (var p in new[] { add, admin, gear, update, view }) p.Height = S(32);
         add.Click += (_, _) => { using var f = new AddForm(); if (f.ShowDialog(this) == DialogResult.OK) Reload(); };
         admin.Visible = !Board.IsAdmin;
-        new ToolTip().SetToolTip(admin, "Shows tasks set up by an administrator and lets you start/stop services.");
         admin.Click += (_, _) => RestartAsAdmin();
         gear.Click += (_, _) => OpenSettings();
         update.Click += async (_, _) => { if (pending != null) await ApplyUpdate(); else await CheckUpdate(manual: true); };
-        filter.Selected = settings.Filter;
-        filter.Changed += () => { settings.Filter = filter.Selected; settings.Save(); Render(); };
-        view.Selected = settings.View == "list" ? 1 : 0;
-        view.Changed += () => { settings.View = view.Selected == 1 ? "list" : "grid"; settings.Save(); Rebuild(); };
-        search.Box.TextChanged += (_, _) => Render();
-        foreach (var p in new[] { add, admin, gear, update }) p.Fit();
-        header.Controls.AddRange(new Control[] { add, admin, gear, update, filter, view, search });
+        view.Click += (_, _) => { settings.View = ListView ? "grid" : "list"; settings.Save(); ShowView(); };
+        tips.SetToolTip(add, "Add server");
+        tips.SetToolTip(admin, "Run as admin: see every task and control services");
+        tips.SetToolTip(gear, "Settings: hidden apps");
+        tips.SetToolTip(update, "Check for updates");
+        foreach (var p in new[] { add, admin, gear, update, view }) p.Fit();
+        header.Controls.AddRange(new Control[] { add, admin, gear, update, view });
 
-        error.Height = S(26);
-        error.Padding = new Padding(S(28), 0, S(28), S(4));
-        grid.Padding = new Padding(S(16), S(4), S(16), S(16));
+        error.Height = S(22);
+        error.Padding = new Padding(S(14), 0, S(14), S(2));
+        grid.Padding = new Padding(S(8), S(4), S(8), S(8));
         grid.Resize += (_, _) => SizeRows();
+        tiles.Act += OnAct;
 
+        Controls.Add(tiles);
         Controls.Add(grid);
         Controls.Add(error);
         Controls.Add(header);
+        ShowView();
 
         timer.Tick += (_, _) => Reload();
         updateTimer.Tick += async (_, _) => await CheckUpdate();
@@ -664,23 +794,27 @@ class MainForm : Form
 
     bool ListView => settings.View == "list";
 
+    void ShowView()
+    {
+        tiles.Visible = !ListView;
+        grid.Visible = ListView;
+        view.Glyph = ListView ? GTiles : GList;
+        tips.SetToolTip(view, ListView ? "Tile view" : "List view");
+        view.Invalidate();
+        Rebuild();
+    }
+
     void LayoutHeader()
     {
-        int pad = S(28), top = S(20), gap = S(8);
+        int pad = S(14), gap = S(6), top = (header.Height - S(32)) / 2;
         int x = header.Width - pad;
-        foreach (var p in new Control[] { add, gear, admin, update })
+        foreach (var p in new Control[] { add, gear, view, update, admin })
         {
             if (!p.Visible) continue;
             x -= p.Width;
             p.Location = new Point(x, top);
             x -= gap;
         }
-        int row2 = S(72);
-        filter.Location = new Point(pad, row2);
-        view.Location = new Point(header.Width - pad - view.Width, row2);
-        int sx = filter.Right + S(12);
-        search.Location = new Point(sx, row2);
-        search.Width = Math.Max(S(160), Math.Min(S(320), view.Left - S(12) - sx));
         header.Invalidate();
     }
 
@@ -688,29 +822,29 @@ class MainForm : Form
     {
         var g = e.Graphics;
         Draw.Smooth(g);
-        int pad = S(28);
-        using var title = new Font("Segoe UI Semibold", 18f);
+        int pad = S(14), cy = header.Height / 2;
+        int limit = new[] { add, gear, view, update, admin }.Where(p => p.Visible).Min(p => p.Left) - S(8);
+        using var title = new Font("Segoe UI Semibold", 13f);
         int tw = Draw.Measure("TaskBoard", title);
-        Draw.Text(g, "TaskBoard", title, new Rectangle(pad - S(4), S(16), tw + S(4), S(40)), Theme.Text);
-        using var vf = new Font("Segoe UI", 8.5f);
-        var ver = "v" + Updater.Current.ToString(3);
-        Draw.Text(g, ver, vf, new Rectangle(pad + tw + S(2), S(28), S(60), S(20)), Theme.Muted);
+        Draw.Text(g, "TaskBoard", title, new Rectangle(pad - S(3), cy - S(16), tw + S(4), S(32)), Theme.Text);
+        int x = pad + tw + S(8);
 
-        int x = pad + tw + S(14) + Draw.Measure(ver, vf);
-        using var cf = new Font("Segoe UI Semibold", 9f);
+        using var cf = new Font("Segoe UI Semibold", 8.5f);
         foreach (var (n, label, c) in new[] { (counts.running, "running", Theme.Run), (counts.ok, "ok", Theme.Ok), (counts.fail, "failed", Theme.Fail) })
         {
             if (n == 0 && label != "running") continue;
             var text = $"{n} {label}";
-            int w = Draw.Measure(text, cf) + S(30);
-            var r = new Rectangle(x, S(24), w, S(26));
+            int w = Draw.Measure(text, cf) + S(24);
+            if (x + w > limit) return;
+            var r = new Rectangle(x, cy - S(11), w, S(22));
             Draw.Fill(g, r, r.Height / 2f, Color.FromArgb(Theme.Dark ? 34 : 26, c));
-            using (var dot = new SolidBrush(c)) g.FillEllipse(dot, r.X + S(10), r.Y + r.Height / 2 - S(3), S(7), S(7));
-            Draw.Text(g, text, cf, new Rectangle(r.X + S(21), r.Y, w - S(24), r.Height), c);
-            x += w + S(8);
+            using (var dot = new SolidBrush(c)) g.FillEllipse(dot, r.X + S(8), cy - S(3), S(6), S(6));
+            Draw.Text(g, text, cf, new Rectangle(r.X + S(17), r.Y, w - S(19), r.Height), c);
+            x += w + S(6);
         }
-        if (counts.hidden > 0)
-            Draw.Text(g, $"{counts.hidden} hidden", cf, new Rectangle(x + S(4), S(24), S(100), S(26)), Theme.Muted);
+        var hid = $"{counts.hidden} hidden";
+        if (counts.hidden > 0 && x + Draw.Measure(hid, cf) < limit)
+            Draw.Text(g, hid, cf, new Rectangle(x + S(2), cy - S(11), Draw.Measure(hid, cf) + S(4), S(22)), Theme.Muted);
     }
 
     void RestartAsAdmin()
@@ -729,28 +863,36 @@ class MainForm : Form
         if (f.ShowDialog(this) == DialogResult.OK) { settings.Save(); Render(); }
     }
 
-    // Quiet: a failed check (offline, rate limited) just leaves the button hidden.
+    // The update button is a ⟳ icon; it turns into words only while there's something to say.
+    void UpdateButton(string text, Color? color = null)
+    {
+        update.Glyph = text == null ? GUpdate : null;
+        update.Text = text ?? "";
+        update.TextColor = color;
+        update.Fit();
+        LayoutHeader();
+    }
+
     // Hourly/at launch: quiet. From the button: says "Checking…", then "Up to date" or the error.
     async Task CheckUpdate(bool manual = false)
     {
         if (checking) return;
         checking = true;
-        void Show(string text, Color? color = null) { update.Text = text; update.TextColor = color; update.Fit(); LayoutHeader(); }
         try
         {
-            if (manual) { update.Enabled = false; Show("Checking…"); }
+            if (manual) { update.Enabled = false; UpdateButton("Checking…"); }
             pending = await Updater.Check();
-            if (pending != null) Show($"Update to v{pending.Version.ToString(3)}", Theme.Run);
+            if (pending != null) UpdateButton($"Update to v{pending.Version.ToString(3)}", Theme.Run);
             else if (manual)
             {
-                Show("Up to date", Theme.Run);
+                UpdateButton("Up to date", Theme.Run);
                 await Task.Delay(2500);
-                if (pending == null) Show("Check for updates");
+                if (pending == null) UpdateButton(null);
             }
         }
         catch (Exception ex)
         {
-            if (manual) { Show("Check for updates"); ShowError("Couldn't check for updates: " + ex.Message); }
+            if (manual) { UpdateButton(null); ShowError("Couldn't check for updates: " + ex.Message); }
         }
         finally { update.Enabled = true; checking = false; }
     }
@@ -759,7 +901,7 @@ class MainForm : Form
     {
         if (pending == null) return;
         update.Enabled = false;
-        update.Text = "Updating…";
+        UpdateButton("Updating…");
         try
         {
             await Updater.Apply(pending);
@@ -770,7 +912,7 @@ class MainForm : Form
         {
             ShowError("Update failed: " + ex.Message, true);
             update.Enabled = true;
-            update.Text = $"Update to v{pending.Version.ToString(3)}";
+            UpdateButton($"Update to v{pending.Version.ToString(3)}", Theme.Run);
         }
     }
 
@@ -806,45 +948,34 @@ class MainForm : Form
         Render();
     }
 
-    // List rows span the window; grid cards stretch so the columns fill the width.
+    // List rows span the window.
     void SizeRows()
     {
-        int avail = grid.ClientSize.Width - grid.Padding.Horizontal - (grid.VerticalScroll.Visible ? 0 : SystemInformation.VerticalScrollBarWidth);
-        int w;
-        if (ListView) w = Math.Max(avail - S(16), S(600));
-        else
-        {
-            int slot = S(300) + S(16);
-            int cols = Math.Max(1, avail / slot);
-            w = Math.Min(avail / cols - S(16) - 1, S(420));
-        }
+        int w = Math.Max(grid.ClientSize.Width - grid.Padding.Horizontal - S(16) - (grid.VerticalScroll.Visible ? 0 : SystemInformation.VerticalScrollBarWidth), S(600));
         foreach (var c in cards.Values) if (c.Width != w) c.Width = w;
     }
 
     void Render()
     {
-        var source = Sources[Math.Clamp(filter.Selected, 0, Sources.Length - 1)];
-        var q = search.Box.Text.Trim();
         var visible = last.Where(i => !settings.IsHidden(i)).ToList();
         counts = (visible.Count(i => i.Kind == "running"), visible.Count(i => i.Kind == "ok"), visible.Count(i => i.Kind == "fail"), last.Count - visible.Count);
         header.Invalidate();
 
-        var list = visible.Where(i => (source == null || i.Has(source))
-            && (q == "" || i.Name.Contains(q, StringComparison.OrdinalIgnoreCase) || i.Tip.Contains(q, StringComparison.OrdinalIgnoreCase))).ToList();
+        if (!ListView) { tiles.SetItems(visible); return; }
 
-        var ids = list.Select(i => i.Id).ToHashSet();
+        var ids = visible.Select(i => i.Id).ToHashSet();
         grid.SuspendLayout();
         foreach (var gone in cards.Keys.Where(k => !ids.Contains(k)).ToList())
         {
             cards[gone].Dispose();
             cards.Remove(gone);
         }
-        for (int n = 0; n < list.Count; n++)
+        for (int n = 0; n < visible.Count; n++)
         {
-            var it = list[n];
+            var it = visible[n];
             if (!cards.TryGetValue(it.Id, out var card))
             {
-                card = cards[it.Id] = new Card(it.Id, ListView);
+                card = cards[it.Id] = new Card(it.Id, true);
                 card.Act += OnAct;
                 grid.Controls.Add(card);
             }
