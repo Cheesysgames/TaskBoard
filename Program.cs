@@ -14,6 +14,16 @@ static class Program
         if (args.Length > 0 && args[0] == "--selftest") return SelfTest.Run();
         if (args.Length > 0 && args[0] == "--update") return Updater.RunHeadless();
         if (args.Length > 0 && args[0] == "--list") return ListToFile();
+        // The window always runs as admin (sees every task, controls services). Command-line modes stay unelevated.
+        if (!Board.IsAdmin && !args.Contains("--no-elevate"))
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath) { UseShellExecute = true, Verb = "runas" });
+                return 0;
+            }
+            catch (System.ComponentModel.Win32Exception) { } // said no to UAC: open normally, "Run as admin" button stays
+        }
         Updater.Cleanup();
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
@@ -96,6 +106,34 @@ static class Sched
     static dynamic Get(string path) => Svc.GetFolder(FolderOf(path)).GetTask(NameOf(path));
 
     public static void Run(string path) => Get(path).Run(null);
+
+    // Start a program as the signed-in user at normal (non-admin) level, even from an elevated TaskBoard:
+    // a throwaway interactive task does the launch, then is removed (the program keeps running).
+    public static void RunAsUser(string file, string extra)
+    {
+        var (exe, args) = Command(file, extra);
+        dynamic def = Svc.NewTask(0);
+        def.RegistrationInfo.Description = "TaskBoard one-off launch";
+        def.Settings.ExecutionTimeLimit = "PT0S";
+        def.Settings.DisallowStartIfOnBatteries = false;
+        def.Settings.StopIfGoingOnBatteries = false;
+        def.Principal.LogonType = 3;   // interactive, current user
+        def.Principal.RunLevel = 0;    // least privilege
+        dynamic a = def.Actions.Create(0);
+        a.Path = exe;
+        a.Arguments = args;
+        a.WorkingDirectory = System.IO.Path.GetDirectoryName(file) ?? "";
+        string name = "TaskBoard launch " + Guid.NewGuid().ToString("N")[..8];
+        dynamic folder = Svc.GetFolder("\\");
+        dynamic task = folder.RegisterTaskDefinition(name, def, 6, WindowsIdentity.GetCurrent().Name, null, 3, null);
+        try
+        {
+            task.Run(null);
+            for (int i = 0; i < 30 && (int)task.State != 4 && (DateTime)task.LastRunTime < DateTime.Now.AddMinutes(-1); i++) Thread.Sleep(100);
+            Thread.Sleep(300);
+        }
+        finally { folder.DeleteTask(name, 0); }
+    }
     public static void Stop(string path) => Get(path).Stop(0);
     public static void SetEnabled(string path, bool on) => Get(path).Enabled = on;
     public static void Delete(string path) => Svc.GetFolder(FolderOf(path)).DeleteTask(NameOf(path), 0);
@@ -557,6 +595,18 @@ static class SelfTest
             }
             finally { Sched.Delete("\\" + name); }
             Check(!Sched.Exists(name), "deleted");
+
+            // One-off launch as the user: the script runs, and no task is left behind.
+            var marker = Path.Combine(Path.GetTempPath(), "taskboard-runasuser.txt");
+            File.Delete(marker);
+            var launcher = Path.Combine(Path.GetTempPath(), "taskboard-runasuser.cmd");
+            File.WriteAllText(launcher, $"@echo ran> \"{marker}\"");
+            Sched.RunAsUser(launcher, "");
+            for (int i = 0; i < 50 && !File.Exists(marker); i++) Thread.Sleep(100);
+            Check(File.Exists(marker), "run as user launched");
+            Check(!Sched.List().Any(t => t.Name.StartsWith("TaskBoard launch")), "run as user cleaned up");
+            File.Delete(marker);
+            File.Delete(launcher);
 
             // Command splitting for Run keys.
             Check(Cmd.Split("\"C:\\Program Files\\Plex\\Plex Media Server.exe\" --x") == (@"C:\Program Files\Plex\Plex Media Server.exe", "--x"), "split quoted");

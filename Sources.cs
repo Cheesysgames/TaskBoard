@@ -324,6 +324,11 @@ static class Startup
         var (s, entry) = Parse(key);
         switch (act)
         {
+            case "run" when Board.IsAdmin:
+                // Don't hand admin rights to the app (Plex as admin would make files your account can't touch).
+                var (re, ra) = CommandOf(s, entry);
+                Sched.RunAsUser(re, ra);
+                break;
             case "run":
                 if (s.Folder != null) Process.Start(new ProcessStartInfo(Path.Combine(s.Folder, entry)) { UseShellExecute = true });
                 else
