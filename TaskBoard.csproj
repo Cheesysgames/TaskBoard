@@ -11,6 +11,6 @@
     <PublishSingleFile>true</PublishSingleFile>
     <!-- Bumped by release.ps1; the updater compares this to the latest GitHub release tag. -->
     <NoWarn>$(NoWarn);WFO1000</NoWarn> <!-- custom controls aren't used in a designer -->
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
   </PropertyGroup>
 </Project>
