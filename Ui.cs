@@ -1,9 +1,15 @@
-// Board UI: owner-drawn cards (grid or list) tinted by each app's own logo, header controls, Settings window.
+// Board UI: logo-tinted tiles in your own drag-and-drop groups, header controls, Settings window.
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Text.Json;
 
 namespace TaskBoard;
+
+class GroupDef
+{
+    public string Name { get; set; } = "";
+    public List<string> Ids { get; set; } = new();
+}
 
 // Everything remembered between runs: %APPDATA%\TaskBoard\settings.json
 class Settings
@@ -13,6 +19,7 @@ class Settings
     public bool HideNoise { get; set; } = true;
     public List<string> Hidden { get; set; } = new();  // always hidden
     public List<string> Shown { get; set; } = new();   // always shown, even if it looks like an updater
+    public List<GroupDef> Groups { get; set; } = new(); // your own groups, in order; apps not in one go to a group named after their type
     public int Width { get; set; }
     public int Height { get; set; }
     public bool Maximized { get; set; }
@@ -37,6 +44,8 @@ class Settings
         s ??= new Settings();
         s.Hidden ??= new();
         s.Shown ??= new();
+        s.Groups ??= new();
+        foreach (var g in s.Groups) g.Ids ??= new();
         // v1.2 kept hidden cards in hidden.txt
         var old = Path.Combine(Dir, "hidden.txt");
         try
@@ -191,7 +200,7 @@ static class Icons
             g.DrawImage(tiny, Rectangle.Round(dest), 0, 0, 8, 8, GraphicsUnit.Pixel, ia);
         }
 
-        // Dim so text stays readable, fading out towards the buttons (bottom, or right in list view).
+        // Dim so text stays readable, fading out to the right.
         using (var veil = new SolidBrush(Color.FromArgb(Theme.Dark ? 150 : 175, Theme.Card))) g.FillRectangle(veil, 0, 0, w, h);
         if (list)
         {
@@ -305,201 +314,130 @@ class Pill : Control
     }
 }
 
-// One app, drawn by hand: blurred-logo backdrop, logo, name, status pill, three facts, action buttons.
-class Card : Control
+// Your own groups. Apps you haven't placed sit in a group named after their type ("Services", ...).
+record Group(string Name, List<Item> Items);
+
+static class Grouping
 {
-    public readonly string Id;
-    public event Action<string, string> Act; // (item id, action)
-    public bool List { get; }
+    static readonly string[] TypeOrder = { "Services", "Scheduled tasks", "Startup apps" };
+    public static string TypeOf(Item i) => i.Source switch { "service" => "Services", "task" => "Scheduled tasks", _ => "Startup apps" };
 
-    static readonly Font FName = new("Segoe UI Semibold", 11f), FSmall = new("Segoe UI", 8.5f), FBody = new("Segoe UI", 9f),
-        FStatus = new("Segoe UI Semibold", 8.5f), FBtn = new("Segoe UI Semibold", 8.75f), FKey = new("Segoe UI", 7.75f);
-    record Hit(Rectangle R, string Act, string Text, bool Enabled);
-
-    Item it;
-    Image logo;
-    readonly List<Hit> hits = new();
-    int hover = -1;
-    readonly ToolTip tip = new() { InitialDelay = 600 };
-    readonly ContextMenuStrip menu = new();
-
-    static int S(int px) => MainForm.S(px);
-
-    public Card(string id, bool list)
+    public static List<Group> Build(List<Item> items, List<GroupDef> defs)
     {
-        Id = id;
-        List = list;
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-        BackColor = Theme.Bg;
-        Size = list ? new Size(S(900), S(68)) : new Size(S(310), S(200));
-        Margin = list ? new Padding(S(8), S(4), S(8), S(4)) : new Padding(S(8));
-        menu.Items.Add("Hide from board", null, (_, _) => Act?.Invoke(Id, "hide"));
-        ContextMenuStrip = menu;
-    }
-
-    public void Bind(Item item, Image img)
-    {
-        bool tipChanged = it?.Tip != item.Tip;
-        it = item;
-        logo = img;
-        if (tipChanged) tip.SetToolTip(this, item.Tip);
-        Invalidate();
-    }
-
-    string[] Actions() => new[]
-    {
-        "run", "stop", it.Enabled ? "disable" : "enable", it.CanDelete ? "delete" : "hide",
-    };
-
-    static string Label(string act) => act switch
-    {
-        "run" => "Run", "stop" => "Stop", "disable" => "Disable", "enable" => "Enable", "delete" => "Delete", _ => "Hide",
-    };
-
-    bool Allowed(string act) => act switch { "run" => it.CanRun, "stop" => it.CanStop, _ => true };
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.Clear(Theme.Bg);
-        if (it == null) return;
-        Draw.Smooth(g);
-        hits.Clear();
-
-        var bounds = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
-        float radius = S(List ? 12 : 16);
-        using (var path = Draw.Round(bounds, radius))
+        var map = items.ToDictionary(i => i.Id);
+        var placed = new HashSet<string>();
+        var groups = defs.Select(d => new Group(d.Name, d.Ids.Where(id => map.ContainsKey(id) && placed.Add(id)).Select(id => map[id]).ToList())).ToList();
+        foreach (var it in items.Where(i => !placed.Contains(i.Id)).OrderBy(i => Array.IndexOf(TypeOrder, TypeOf(i))))
         {
-            var bd = Icons.Backdrop(it, Size, List);
-            using var tex = new TextureBrush(bd, WrapMode.Clamp);
-            g.FillPath(tex, path);
-            using var border = new Pen(Color.FromArgb(Theme.Dark ? 60 : 90, Icons.Palette(it)));
-            g.DrawPath(border, path);
+            var g = groups.FirstOrDefault(x => x.Name.Equals(TypeOf(it), StringComparison.OrdinalIgnoreCase));
+            if (g == null) groups.Add(g = new Group(TypeOf(it), new()));
+            g.Items.Add(it);
         }
-        if (List) PaintRow(g); else PaintCard(g);
+        return groups;
     }
 
-    void PaintLogo(Graphics g, Rectangle r)
+    // Write what's on screen into the saved groups, keeping ids that aren't showing (hidden apps) where they were.
+    static void Save(Settings s, List<Group> shown)
     {
-        Draw.Fill(g, r, S(10), Theme.Wash(16));
-        var inner = Rectangle.Inflate(r, -S(6), -S(6));
-        if (logo != null) g.DrawImage(logo, inner);
-    }
-
-    int StatusPill(Graphics g, int right, int cy)
-    {
-        var c = Theme.Of(it.Kind);
-        int w = Draw.Measure(it.Label, FStatus) + S(30), h = S(24);
-        var r = new Rectangle(right - w, cy - h / 2, w, h);
-        Draw.Fill(g, r, h / 2f, Color.FromArgb(Theme.Dark ? 38 : 30, c));
-        using (var dot = new SolidBrush(c)) g.FillEllipse(dot, r.X + S(10), cy - S(3), S(7), S(7));
-        Draw.Text(g, it.Label, FStatus, new Rectangle(r.X + S(21), r.Y, w - S(24), h), c);
-        return w;
-    }
-
-    void Buttons(Graphics g, Rectangle area, int gap)
-    {
-        var acts = Actions();
-        int bw = (area.Width - gap * (acts.Length - 1)) / acts.Length;
-        for (int i = 0; i < acts.Length; i++)
+        var onScreen = shown.SelectMany(g => g.Items).Select(i => i.Id).ToHashSet();
+        var old = s.Groups.ToDictionary(g => g.Name, g => g.Ids.Where(id => !onScreen.Contains(id)).ToList(), StringComparer.OrdinalIgnoreCase);
+        s.Groups = shown.Select(g => new GroupDef
         {
-            var r = new Rectangle(area.X + i * (bw + gap), area.Y, bw, area.Height);
-            bool on = Allowed(acts[i]);
-            int idx = hits.Count;
-            hits.Add(new Hit(r, acts[i], Label(acts[i]), on));
-            bool hov = on && idx == hover;
-            bool danger = acts[i] == "delete";
-            Draw.Fill(g, r, r.Height / 2f, hov ? (danger ? Color.FromArgb(70, Theme.Fail) : Theme.Wash(34)) : Theme.Wash(on ? 16 : 7));
-            var fg = !on ? Color.FromArgb(Theme.Dark ? 80 : 110, Theme.Muted) : danger && hov ? Theme.Text : Theme.Text;
-            Draw.Text(g, Label(acts[i]), FBtn, r, fg, TextFormatFlags.HorizontalCenter);
-        }
+            Name = g.Name,
+            Ids = g.Items.Select(i => i.Id).Concat(old.TryGetValue(g.Name, out var rest) ? rest : new List<string>()).ToList(),
+        })
+        // An emptied default group ("Services" etc.) goes away; your own empty groups stay to drop into.
+        .Where(d => d.Ids.Count > 0 || !TypeOrder.Contains(d.Name, StringComparer.OrdinalIgnoreCase))
+        .ToList();
     }
 
-    void PaintCard(Graphics g)
+    public static void Move(Settings s, List<Group> shown, string id, int group, int index)
     {
-        int pad = S(16);
-        PaintLogo(g, new Rectangle(pad, pad, S(48), S(48)));
-        int pillW = StatusPill(g, Width - pad, pad + S(14));
-        int tx = pad + S(60), tw = Width - tx - pillW - S(22);
-        Draw.Text(g, it.Name, FName, new Rectangle(tx, pad, tw, S(26)), Theme.Text);
-        Draw.Text(g, it.Group, FSmall, new Rectangle(tx, pad + S(26), Width - tx - pad, S(20)), Theme.Muted);
-
-        int y = S(80);
-        foreach (var row in it.Rows.Take(3))
-        {
-            Draw.Text(g, row.Label, FBody, new Rectangle(pad, y, S(110), S(22)), Theme.Muted);
-            Draw.Text(g, row.Value, FBody, new Rectangle(pad + S(100), y, Width - pad * 2 - S(100), S(22)),
-                row.Alert ? Theme.Of(it.Kind) : Theme.Text, TextFormatFlags.Right);
-            y += S(22);
-        }
-        Buttons(g, new Rectangle(pad, Height - pad - S(30), Width - pad * 2, S(30)), S(6));
+        var it = shown.SelectMany(g => g.Items).First(i => i.Id == id);
+        foreach (var g in shown) g.Items.RemoveAll(i => i.Id == id);
+        var target = shown[group].Items;
+        target.Insert(Math.Clamp(index, 0, target.Count), it);
+        Save(s, shown);
     }
 
-    void PaintRow(Graphics g)
+    public static string NewName(List<Group> shown)
     {
-        int pad = S(14), cy = Height / 2;
-        PaintLogo(g, new Rectangle(pad, cy - S(22), S(44), S(44)));
-        int x = pad + S(58);
-
-        int btnW = S(300), btnX = Width - pad - btnW;
-        Buttons(g, new Rectangle(btnX, cy - S(15), btnW, S(30)), S(6));
-
-        int nameW = Math.Clamp((Width - x - btnW) / 4, S(160), S(280));
-        Draw.Text(g, it.Name, FName, new Rectangle(x, cy - S(20), nameW, S(22)), Theme.Text);
-        Draw.Text(g, it.Group, FSmall, new Rectangle(x, cy + S(1), nameW, S(18)), Theme.Muted);
-        x += nameW + S(12);
-
-        int pillW = Draw.Measure(it.Label, FStatus) + S(30);
-        StatusPill(g, x + pillW, cy);
-        x += Math.Max(pillW, S(110)) + S(16);
-
-        int avail = btnX - S(16) - x;
-        int cols = Math.Min(3, Math.Max(0, avail / S(110)));
-        if (cols == 0) return;
-        int colW = Math.Min(S(170), avail / cols);
-        foreach (var row in it.Rows.Take(cols))
-        {
-            Draw.Text(g, row.Label.ToUpperInvariant(), FKey, new Rectangle(x, cy - S(19), colW - S(8), S(16)), Theme.Muted);
-            Draw.Text(g, row.Value, FBody, new Rectangle(x, cy - S(2), colW - S(8), S(20)), row.Alert ? Theme.Of(it.Kind) : Theme.Text);
-            x += colW;
-        }
+        for (int n = 1; ; n++) if (!shown.Any(g => g.Name == $"Group {n}")) return $"Group {n}";
     }
 
-    protected override void OnMouseMove(MouseEventArgs e)
+    public static void NewGroup(Settings s, List<Group> shown, string id, string name)
     {
-        int h = hits.FindIndex(x => x.R.Contains(e.Location));
-        Cursor = h >= 0 && hits[h].Enabled ? Cursors.Hand : Cursors.Default;
-        if (h != hover) { hover = h; Invalidate(); }
+        shown.Add(new Group(name, new()));
+        Move(s, shown, id, shown.Count - 1, 0);
     }
 
-    protected override void OnMouseLeave(EventArgs e) { hover = -1; Invalidate(); base.OnMouseLeave(e); }
-
-    protected override void OnMouseClick(MouseEventArgs e)
+    public static void Rename(Settings s, List<Group> shown, int group, string name)
     {
-        base.OnMouseClick(e);
-        if (e.Button != MouseButtons.Left) return;
-        var h = hits.FirstOrDefault(x => x.R.Contains(e.Location));
-        if (h != null && h.Enabled) Act?.Invoke(Id, h.Act);
+        var saved = s.Groups.FirstOrDefault(g => g.Name.Equals(shown[group].Name, StringComparison.OrdinalIgnoreCase));
+        if (saved != null) saved.Name = name; // so hidden apps in it move along
+        shown[group] = shown[group] with { Name = name };
+        Save(s, shown);
     }
 
-    protected override void Dispose(bool disposing)
+    public static void Shift(Settings s, List<Group> shown, int group, int by)
     {
-        if (disposing) { tip.Dispose(); menu.Dispose(); }
-        base.Dispose(disposing);
+        int to = Math.Clamp(group + by, 0, shown.Count - 1);
+        var g = shown[group];
+        shown.RemoveAt(group);
+        shown.Insert(to, g);
+        Save(s, shown);
+    }
+
+    // Its apps go back to their type groups.
+    public static void Delete(Settings s, List<Group> shown, int group)
+    {
+        var name = shown[group].Name;
+        shown.RemoveAt(group);
+        Save(s, shown);
+        s.Groups.RemoveAll(g => g.Name == name);
     }
 }
 
-class Board2 : FlowLayoutPanel
+// Simple one-line text prompt.
+class Prompt : Form
 {
-    [System.Runtime.InteropServices.DllImport("uxtheme.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-    static extern int SetWindowTheme(IntPtr hwnd, string app, string idList);
+    readonly TextBox box = new() { BorderStyle = BorderStyle.FixedSingle, Font = new Font("Segoe UI", 10f) };
 
-    public Board2() { DoubleBuffered = true; SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true); }
-
-    protected override void OnHandleCreated(EventArgs e)
+    Prompt(string title, string value)
     {
-        base.OnHandleCreated(e);
-        if (Theme.Dark) SetWindowTheme(Handle, "DarkMode_Explorer", null); // dark scrollbar
+        Text = title;
+        Font = new Font("Segoe UI", 9.5f);
+        BackColor = Theme.Bg;
+        ForeColor = Theme.Text;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MinimizeBox = MaximizeBox = false;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.CenterParent;
+        ClientSize = new Size(MainForm.S(320), MainForm.S(110));
+        box.Text = value;
+        box.BackColor = Theme.Card;
+        box.ForeColor = Theme.Text;
+        box.SetBounds(MainForm.S(16), MainForm.S(16), MainForm.S(288), MainForm.S(28));
+        var ok = new Pill("Save") { Primary = true };
+        var cancel = new Pill("Cancel");
+        ok.Fit(); cancel.Fit();
+        ok.Width = cancel.Width = MainForm.S(86);
+        ok.Location = new Point(MainForm.S(304) - ok.Width, MainForm.S(64));
+        cancel.Location = new Point(ok.Left - MainForm.S(8) - cancel.Width, MainForm.S(64));
+        ok.Click += (_, _) => DialogResult = DialogResult.OK;
+        cancel.Click += (_, _) => DialogResult = DialogResult.Cancel;
+        Controls.AddRange(new Control[] { box, ok, cancel });
+        AcceptButton = new Button { DialogResult = DialogResult.OK };
+        CancelButton = new Button { DialogResult = DialogResult.Cancel };
+        Load += (_, _) => { Theme.TitleBar(this); box.SelectAll(); box.Focus(); };
+    }
+
+    public static string Ask(IWin32Window owner, string title, string value)
+    {
+        using var p = new Prompt(title, value);
+        if (p.ShowDialog(owner) != DialogResult.OK) return null;
+        var v = p.box.Text.Trim();
+        return v == "" ? null : v;
     }
 }
 
@@ -520,19 +458,30 @@ class MenuColors : ProfessionalColorTable
     public override Color SeparatorLight => Theme.Line;
 }
 
-// Grid view: compact tiles in groups, sized to fit the window so nothing scrolls (down to a minimum size).
-// Click or right-click a tile for its actions; hover for details.
+// The board: tiles in your groups, sized to fit the window so nothing scrolls (down to a minimum size).
+// Drag a tile to reorder or regroup it (drop on "+ New group" to make one). Click a tile for actions, a group name to rename/move/delete.
 class TileBoard : ScrollableControl
 {
     public event Action<string, string> Act;
-    static readonly string[] Order = { "Services", "Scheduled tasks", "Startup apps" };
+    public Settings Settings;
     static readonly Font FName = new("Segoe UI Semibold", 9.5f), FLine = new("Segoe UI", 8.25f), FHead = new("Segoe UI Semibold", 8f);
 
-    List<(string Title, List<Item> Items)> groups = new();
-    readonly List<(Rectangle R, Item It)> tiles = new();
-    readonly List<(Rectangle R, string Text)> heads = new();
+    record Slot(Group Group, Rectangle Head, Rectangle Area, List<(Rectangle R, Item It)> Tiles);
+
+    List<Group> groups = new();
+    List<Item> pendingItems;
+    readonly List<Slot> slots = new();
+    Rectangle newZone;
+    Size tileSize;
     Item hover;
     readonly ToolTip tip = new() { InitialDelay = 500, AutoPopDelay = 15000 };
+
+    // Dragging
+    Item pressed;
+    Point pressAt, dragAt, grabOffset;
+    bool dragging;
+    int dropGroup = -1, dropIndex = -1;
+    bool dropNew;
 
     [System.Runtime.InteropServices.DllImport("uxtheme.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     static extern int SetWindowTheme(IntPtr hwnd, string app, string idList);
@@ -552,50 +501,55 @@ class TileBoard : ScrollableControl
         if (Theme.Dark) SetWindowTheme(Handle, "DarkMode_Explorer", null);
     }
 
-    public static string GroupOf(Item i) => i.Source switch { "service" => "Services", "task" => "Scheduled tasks", _ => "Startup apps" };
-
     public void SetItems(List<Item> items)
     {
-        groups = Order.Select(t => (t, items.Where(i => GroupOf(i) == t).ToList())).Where(g => g.Item2.Count > 0).ToList();
+        if (dragging) { pendingItems = items; return; } // don't reshuffle under the cursor
+        groups = Grouping.Build(items, Settings.Groups);
         if (hover != null) hover = items.FirstOrDefault(i => i.Id == hover.Id);
         DoLayout();
         Invalidate();
     }
 
+    void Rebuild(List<Item> items) => SetItems(items ?? groups.SelectMany(g => g.Items).ToList());
+
     protected override void OnResize(EventArgs e) { base.OnResize(e); DoLayout(); Invalidate(); }
 
-    // Pick the column count and tile height that fit everything: as many columns as the width allows,
-    // then tiles as tall as the height allows (tile width can shrink to make more columns if needed).
+    // As many columns as the width allows, then tiles as tall as the height allows; shrink tile width before scrolling.
     void DoLayout()
     {
-        tiles.Clear();
-        heads.Clear();
-        if (groups.Count == 0) { AutoScrollMinSize = Size.Empty; return; }
+        slots.Clear();
         int pad = S(12), gap = S(8), headH = S(26), groupGap = S(6);
         int W = ClientSize.Width - pad * 2, H = ClientSize.Height - pad * 2;
+        // "+ New group" floats over the bottom of the window while dragging (window coords), so nothing reflows.
+        newZone = new Rectangle(pad, ClientSize.Height - pad - S(38), W, S(38));
         int G = groups.Count;
+        int RowsOf(Group g, int cols) => Math.Max(1, (g.Items.Count + cols - 1) / cols); // an empty group keeps one row to drop into
 
         int cols = 1, tileH = S(44);
         foreach (var minW in new[] { 190, 170, 150, 135 })
         {
             cols = Math.Max(1, (W + gap) / (S(minW) + gap));
-            int rows = groups.Sum(g => (g.Items.Count + cols - 1) / cols);
+            int rows = groups.Sum(g => RowsOf(g, cols));
             tileH = (H - G * (headH + groupGap) - rows * gap) / Math.Max(rows, 1);
             if (tileH >= S(46)) break;
         }
         tileH = Math.Clamp(tileH, S(44), S(70));
         int tileW = (W - (cols - 1) * gap) / cols;
+        tileSize = new Size(tileW, tileH);
 
         int y = pad;
-        foreach (var (title, items) in groups)
+        foreach (var g in groups)
         {
-            heads.Add((new Rectangle(pad, y, W, headH), $"{title.ToUpperInvariant()}   {items.Count}"));
+            var head = new Rectangle(pad, y, W, headH);
             y += headH;
-            for (int i = 0; i < items.Count; i++)
-                tiles.Add((new Rectangle(pad + i % cols * (tileW + gap), y + i / cols * (tileH + gap), tileW, tileH), items[i]));
-            y += (items.Count + cols - 1) / cols * (tileH + gap) + groupGap;
+            var list = new List<(Rectangle, Item)>();
+            for (int i = 0; i < g.Items.Count; i++)
+                list.Add((new Rectangle(pad + i % cols * (tileW + gap), y + i / cols * (tileH + gap), tileW, tileH), g.Items[i]));
+            int h = RowsOf(g, cols) * (tileH + gap) - gap;
+            slots.Add(new Slot(g, head, new Rectangle(pad, y, W, h), list));
+            y += h + gap + groupGap;
         }
-        int total = y + pad - groupGap;
+        int total = y + pad - gap;
         AutoScrollMinSize = total > ClientSize.Height ? new Size(0, total) : Size.Empty;
     }
 
@@ -615,18 +569,63 @@ class TileBoard : ScrollableControl
         Draw.Smooth(g);
         g.TranslateTransform(AutoScrollPosition.X, AutoScrollPosition.Y);
 
-        foreach (var (r, text) in heads)
+        for (int s = 0; s < slots.Count; s++)
         {
-            Draw.Text(g, text, FHead, new Rectangle(r.X + S(2), r.Y, r.Width, r.Height - S(4)), Theme.Muted);
+            var slot = slots[s];
+            var text = $"{slot.Group.Name.ToUpperInvariant()}   {slot.Group.Items.Count}";
+            bool hot = dragging && dropGroup == s && !dropNew;
+            Draw.Text(g, text, FHead, new Rectangle(slot.Head.X + S(2), slot.Head.Y, slot.Head.Width, slot.Head.Height - S(4)), hot ? Theme.Accent : Theme.Muted);
             int tw = Draw.Measure(text, FHead) + S(12);
-            using var line = new Pen(Theme.Line);
-            g.DrawLine(line, r.X + tw, r.Y + (r.Height - S(4)) / 2, r.Right, r.Y + (r.Height - S(4)) / 2);
+            using (var line = new Pen(hot ? Theme.Accent : Theme.Line))
+                g.DrawLine(line, slot.Head.X + tw, slot.Head.Y + (slot.Head.Height - S(4)) / 2, slot.Head.Right, slot.Head.Y + (slot.Head.Height - S(4)) / 2);
+
+            if (slot.Group.Items.Count == 0) Dashed(g, new Rectangle(slot.Area.X, slot.Area.Y, slot.Area.Width, tileSize.Height), "Drag apps here", hot);
+            foreach (var (r, it) in slot.Tiles)
+            {
+                if (dragging && it.Id == pressed.Id) { Dashed(g, r, null, false); continue; } // its old spot
+                PaintTile(g, r, it, 255);
+            }
         }
 
-        foreach (var (r, it) in tiles) PaintTile(g, r, it);
+        if (dragging)
+        {
+            var keep = g.Transform;
+            g.ResetTransform();
+            Draw.Fill(g, Rectangle.Inflate(newZone, S(4), S(4)), S(12), Color.FromArgb(235, Theme.Bg));
+            Dashed(g, newZone, "+  Drop here to start a new group", dropNew);
+            g.Transform = keep;
+            if (!dropNew && dropGroup >= 0) DrawInsertMark(g);
+            var at = new Point(dragAt.X - AutoScrollPosition.X - grabOffset.X, dragAt.Y - AutoScrollPosition.Y - grabOffset.Y);
+            var r = new Rectangle(at, tileSize);
+            using (var shadow = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
+            using (var sp = Draw.Round(new RectangleF(r.X + S(3), r.Y + S(5), r.Width, r.Height), S(10)))
+                g.FillPath(shadow, sp);
+            PaintTile(g, r, pressed, 235);
+        }
     }
 
-    void PaintTile(Graphics g, Rectangle r, Item it)
+    void Dashed(Graphics g, Rectangle r, string text, bool hot)
+    {
+        var rf = new RectangleF(r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1);
+        if (hot) Draw.Fill(g, rf, S(10), Color.FromArgb(40, Theme.Accent));
+        using var path = Draw.Round(rf, S(10));
+        using var pen = new Pen(hot ? Theme.Accent : Theme.Line, hot ? 1.5f : 1f) { DashStyle = DashStyle.Dash };
+        g.DrawPath(pen, path);
+        if (text != null) Draw.Text(g, text, FLine, r, hot ? Theme.Accent : Theme.Muted, TextFormatFlags.HorizontalCenter);
+    }
+
+    void DrawInsertMark(Graphics g)
+    {
+        var slot = slots[dropGroup];
+        var tiles = slot.Tiles.Where(t => t.It.Id != pressed.Id).ToList();
+        if (tiles.Count == 0) return; // empty group: its dashed box lights up instead
+        Rectangle mark;
+        if (dropIndex < tiles.Count) { var t = tiles[dropIndex].R; mark = new Rectangle(t.X - S(5), t.Y + S(4), S(3), t.Height - S(8)); }
+        else { var t = tiles[^1].R; mark = new Rectangle(t.Right + S(2), t.Y + S(4), S(3), t.Height - S(8)); }
+        Draw.Fill(g, mark, S(2), Theme.Accent);
+    }
+
+    void PaintTile(Graphics g, Rectangle r, Item it, int alpha)
     {
         var rf = new RectangleF(r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1);
         using (var path = Draw.Round(rf, S(10)))
@@ -634,9 +633,10 @@ class TileBoard : ScrollableControl
             using var tex = new TextureBrush(Icons.Backdrop(it, r.Size, true), WrapMode.Clamp);
             tex.TranslateTransform(r.X, r.Y);
             g.FillPath(tex, path);
+            bool hov = !dragging && hover?.Id == it.Id;
             var edge = it.Kind == "fail" ? Color.FromArgb(170, Theme.Fail)
-                : hover?.Id == it.Id ? Theme.Wash(70) : Color.FromArgb(Theme.Dark ? 55 : 80, Icons.Palette(it));
-            using var pen = new Pen(edge, hover?.Id == it.Id || it.Kind == "fail" ? 1.5f : 1f);
+                : hov || alpha < 255 ? Theme.Wash(80) : Color.FromArgb(Theme.Dark ? 55 : 80, Icons.Palette(it));
+            using var pen = new Pen(edge, hov || it.Kind == "fail" || alpha < 255 ? 1.5f : 1f);
             g.DrawPath(pen, path);
         }
 
@@ -660,48 +660,173 @@ class TileBoard : ScrollableControl
             Draw.Text(g, "· " + detail, FLine, new Rectangle(lx + lw - S(2), mid, tw - S(10) - lw + S(2), S(16)), it.Rows.Any(x => x.Alert) ? c : Theme.Muted);
     }
 
-    Item At(Point p)
+    Point Content(Point p) => new(p.X - AutoScrollPosition.X, p.Y - AutoScrollPosition.Y);
+    (Rectangle R, Item It) TileAt(Point content) => slots.SelectMany(s => s.Tiles).FirstOrDefault(t => t.R.Contains(content));
+    int HeadAt(Point content) => slots.FindIndex(s => s.Head.Contains(content));
+
+    // Where a drop would land: the group under the cursor (header, tiles or the gap after them) and the slot in reading order.
+    void FindDrop(Point content)
     {
-        p.Offset(-AutoScrollPosition.X, -AutoScrollPosition.Y);
-        return tiles.FirstOrDefault(t => t.R.Contains(p)).It;
+        var client = new Point(content.X + AutoScrollPosition.X, content.Y + AutoScrollPosition.Y);
+        dropNew = newZone.Contains(client);
+        dropGroup = -1;
+        dropIndex = -1;
+        if (dropNew) return;
+        for (int s = 0; s < slots.Count; s++)
+        {
+            var zone = Rectangle.FromLTRB(slots[s].Head.Left, slots[s].Head.Top, slots[s].Area.Right, slots[s].Area.Bottom + S(10));
+            if (!zone.Contains(content)) continue;
+            dropGroup = s;
+            var tiles = slots[s].Tiles.Where(t => t.It.Id != pressed.Id).ToList();
+            dropIndex = tiles.Count;
+            for (int i = 0; i < tiles.Count; i++)
+            {
+                var r = tiles[i].R;
+                if (content.Y < r.Top || (content.Y < r.Bottom + S(8) && content.X < r.X + r.Width / 2)) { dropIndex = i; break; }
+            }
+            return;
+        }
+        // Below everything / beside it: nearest group vertically
+        if (slots.Count > 0)
+        {
+            dropGroup = content.Y < slots[0].Head.Top ? 0 : slots.FindLastIndex(s => s.Head.Top <= content.Y);
+            if (dropGroup >= 0) dropIndex = slots[dropGroup].Tiles.Count(t => t.It.Id != pressed.Id);
+        }
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button != MouseButtons.Left) return;
+        var (r, it) = TileAt(Content(e.Location));
+        pressed = it;
+        pressAt = e.Location;
+        if (it != null) { var c = Content(e.Location); grabOffset = new Point(c.X - r.X, c.Y - r.Y); }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
-        var h = At(e.Location);
+        if (pressed != null) // set on left-button down, cleared on up
+        {
+            if (!dragging && (Math.Abs(e.X - pressAt.X) > SystemInformation.DragSize.Width || Math.Abs(e.Y - pressAt.Y) > SystemInformation.DragSize.Height))
+            {
+                dragging = true;
+                tip.Hide(this);
+                tip.Active = false;
+                Capture = true;
+                Invalidate();
+            }
+            if (dragging)
+            {
+                dragAt = e.Location;
+                FindDrop(Content(e.Location));
+                Cursor = Cursors.SizeAll;
+                Invalidate();
+                return;
+            }
+        }
+
+        var c = Content(e.Location);
+        var h = TileAt(c).It;
+        Cursor = h != null || HeadAt(c) >= 0 ? Cursors.Hand : Cursors.Default;
         if (h?.Id == hover?.Id) return;
         hover = h;
-        Cursor = h != null ? Cursors.Hand : Cursors.Default;
-        tip.SetToolTip(this, h == null ? "" : $"{h.Name}\n{h.Group}\n\n{string.Join("\n", h.Rows.Select(x => $"{x.Label}: {x.Value}"))}\n\nClick for actions");
+        tip.SetToolTip(this, h == null ? "" : $"{h.Name}\n{h.Group}\n\n{string.Join("\n", h.Rows.Select(x => $"{x.Label}: {x.Value}"))}\n\nClick for actions · drag to move");
         Invalidate();
     }
 
-    protected override void OnMouseLeave(EventArgs e) { hover = null; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseLeave(EventArgs e) { if (!dragging) { hover = null; Invalidate(); } base.OnMouseLeave(e); }
 
-    protected override void OnMouseClick(MouseEventArgs e)
+    protected override void OnMouseUp(MouseEventArgs e)
     {
-        base.OnMouseClick(e);
-        var it = At(e.Location);
-        if (it == null) return;
-        tip.Hide(this);
-        var menu = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new MenuColors()), ShowImageMargin = false, Font = new Font("Segoe UI", 9.5f) };
-        menu.Items.Add(new ToolStripLabel(it.Name) { Font = new Font("Segoe UI Semibold", 9.5f), ForeColor = Theme.Text });
-        menu.Items.Add(new ToolStripLabel($"{it.Group} · {it.Label}") { ForeColor = Theme.Muted });
-        menu.Items.Add(new ToolStripSeparator());
-        void Add(string text, string act, bool on = true)
+        base.OnMouseUp(e);
+        if (dragging)
         {
-            var mi = new ToolStripMenuItem(text) { Enabled = on, ForeColor = Theme.Text };
-            mi.Click += (_, _) => Act?.Invoke(it.Id, act);
-            menu.Items.Add(mi);
+            FindDrop(Content(e.Location)); // where the button came up, not the last move
+            var it = pressed;
+            dragging = false;
+            pressed = null;
+            Capture = false;
+            tip.Active = true;
+            Cursor = Cursors.Default;
+            Drop(it);
+            var items = pendingItems;
+            pendingItems = null;
+            Rebuild(items);
+            return;
         }
-        Add("Run", "run", it.CanRun);
-        Add("Stop", "stop", it.CanStop);
-        Add(it.Enabled ? "Disable" : "Enable", it.Enabled ? "disable" : "enable");
-        menu.Items.Add(new ToolStripSeparator());
-        if (it.CanDelete) Add("Delete…", "delete");
-        Add("Hide from board", "hide");
-        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
-        menu.Show(this, e.Location);
+        var c = Content(e.Location);
+        var tile = TileAt(c).It;
+        pressed = null;
+        if (tile != null && (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right)) { TileMenu(tile, e.Location); return; }
+        int head = HeadAt(c);
+        if (head >= 0) GroupMenu(head, e.Location);
+    }
+
+    void Drop(Item it)
+    {
+        if (dropNew)
+        {
+            var name = Prompt.Ask(FindForm(), "New group", Grouping.NewName(groups));
+            if (name == null) return;
+            Grouping.NewGroup(Settings, groups, it.Id, name);
+        }
+        else if (dropGroup >= 0) Grouping.Move(Settings, groups, it.Id, dropGroup, dropIndex);
+        else return;
+        Settings.Save();
+    }
+
+    ContextMenuStrip Menu() => new() { Renderer = new ToolStripProfessionalRenderer(new MenuColors()), ShowImageMargin = false, Font = new Font("Segoe UI", 9.5f) };
+
+    void Item(ContextMenuStrip m, string text, Action a, bool on = true)
+    {
+        var mi = new ToolStripMenuItem(text) { Enabled = on, ForeColor = Theme.Text };
+        mi.Click += (_, _) => a();
+        m.Items.Add(mi);
+    }
+
+    void ShowMenu(ContextMenuStrip m, Point at)
+    {
+        tip.Hide(this);
+        m.Closed += (_, _) => BeginInvoke(m.Dispose);
+        m.Show(this, at);
+    }
+
+    void TileMenu(Item it, Point at)
+    {
+        var m = Menu();
+        m.Items.Add(new ToolStripLabel(it.Name) { Font = new Font("Segoe UI Semibold", 9.5f), ForeColor = Theme.Text });
+        m.Items.Add(new ToolStripLabel($"{it.Group} · {it.Label}") { ForeColor = Theme.Muted });
+        m.Items.Add(new ToolStripSeparator());
+        Item(m, "Run", () => Act?.Invoke(it.Id, "run"), it.CanRun);
+        Item(m, "Stop", () => Act?.Invoke(it.Id, "stop"), it.CanStop);
+        Item(m, it.Enabled ? "Disable" : "Enable", () => Act?.Invoke(it.Id, it.Enabled ? "disable" : "enable"));
+        m.Items.Add(new ToolStripSeparator());
+        if (it.CanDelete) Item(m, "Delete…", () => Act?.Invoke(it.Id, "delete"));
+        Item(m, "Hide from board", () => Act?.Invoke(it.Id, "hide"));
+        ShowMenu(m, at);
+    }
+
+    void GroupMenu(int index, Point at)
+    {
+        var m = Menu();
+        m.Items.Add(new ToolStripLabel(groups[index].Name) { Font = new Font("Segoe UI Semibold", 9.5f), ForeColor = Theme.Text });
+        m.Items.Add(new ToolStripSeparator());
+        void Done() { Settings.Save(); Rebuild(null); }
+        Item(m, "Rename…", () =>
+        {
+            var name = Prompt.Ask(FindForm(), "Rename group", groups[index].Name);
+            if (name == null || name == groups[index].Name) return;
+            if (groups.Any(g => g.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            { MessageBox.Show(FindForm(), $"There's already a group called \"{name}\".", "Rename group"); return; }
+            Grouping.Rename(Settings, groups, index, name);
+            Done();
+        });
+        Item(m, "Move up", () => { Grouping.Shift(Settings, groups, index, -1); Done(); }, index > 0);
+        Item(m, "Move down", () => { Grouping.Shift(Settings, groups, index, 1); Done(); }, index < groups.Count - 1);
+        m.Items.Add(new ToolStripSeparator());
+        Item(m, "Delete group", () => { Grouping.Delete(Settings, groups, index); Done(); });
+        ShowMenu(m, at);
     }
 }
 
@@ -710,17 +835,15 @@ class MainForm : Form
     public static float DpiScale = 1;
     public static int S(int px) => (int)Math.Round(px * DpiScale);
 
-    const string GUpdate = "", GSettings = "", GAdd = "", GAdmin = "", GList = "", GTiles = "";
+    const string GUpdate = "", GSettings = "", GAdd = "", GAdmin = "";
     readonly Settings settings = Settings.Load();
     readonly TileBoard tiles = new() { Dock = DockStyle.Fill };
-    readonly Board2 grid = new() { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Theme.Bg };
     readonly Label error = new() { Dock = DockStyle.Top, ForeColor = Theme.Fail, AutoEllipsis = true, Visible = false };
     readonly Panel header = new() { Dock = DockStyle.Top, BackColor = Theme.Bg };
-    readonly Dictionary<string, Card> cards = new();
     readonly System.Windows.Forms.Timer timer = new() { Interval = 3000 };
     readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 60 * 60 * 1000 };
     readonly Pill add = new("") { Primary = true, Glyph = GAdd }, admin = new("") { Glyph = GAdmin }, gear = new("") { Glyph = GSettings },
-        update = new("") { Glyph = GUpdate }, view = new("");
+        update = new("") { Glyph = GUpdate };
     readonly ToolTip tips = new();
     Updater.Release pending;
     List<Item> last = new();
@@ -755,31 +878,27 @@ class MainForm : Form
         header.Paint += PaintHeader;
         header.Resize += (_, _) => LayoutHeader();
 
-        foreach (var p in new[] { add, admin, gear, update, view }) p.Height = S(32);
+        foreach (var p in new[] { add, admin, gear, update }) p.Height = S(32);
         add.Click += (_, _) => { using var f = new AddForm(); if (f.ShowDialog(this) == DialogResult.OK) Reload(); };
         admin.Visible = !Board.IsAdmin;
         admin.Click += (_, _) => RestartAsAdmin();
         gear.Click += (_, _) => OpenSettings();
         update.Click += async (_, _) => { if (pending != null) await ApplyUpdate(); else await CheckUpdate(manual: true); };
-        view.Click += (_, _) => { settings.View = ListView ? "grid" : "list"; settings.Save(); ShowView(); };
         tips.SetToolTip(add, "Add server");
         tips.SetToolTip(admin, "Run as admin: see every task and control services");
         tips.SetToolTip(gear, "Settings: hidden apps");
         tips.SetToolTip(update, "Check for updates");
-        foreach (var p in new[] { add, admin, gear, update, view }) p.Fit();
-        header.Controls.AddRange(new Control[] { add, admin, gear, update, view });
+        foreach (var p in new[] { add, admin, gear, update }) p.Fit();
+        header.Controls.AddRange(new Control[] { add, admin, gear, update });
 
         error.Height = S(22);
         error.Padding = new Padding(S(14), 0, S(14), S(2));
-        grid.Padding = new Padding(S(8), S(4), S(8), S(8));
-        grid.Resize += (_, _) => SizeRows();
         tiles.Act += OnAct;
 
         Controls.Add(tiles);
-        Controls.Add(grid);
         Controls.Add(error);
         Controls.Add(header);
-        ShowView();
+        tiles.Settings = settings;
 
         timer.Tick += (_, _) => Reload();
         updateTimer.Tick += async (_, _) => await CheckUpdate();
@@ -792,23 +911,11 @@ class MainForm : Form
         };
     }
 
-    bool ListView => settings.View == "list";
-
-    void ShowView()
-    {
-        tiles.Visible = !ListView;
-        grid.Visible = ListView;
-        view.Glyph = ListView ? GTiles : GList;
-        tips.SetToolTip(view, ListView ? "Tile view" : "List view");
-        view.Invalidate();
-        Rebuild();
-    }
-
     void LayoutHeader()
     {
         int pad = S(14), gap = S(6), top = (header.Height - S(32)) / 2;
         int x = header.Width - pad;
-        foreach (var p in new Control[] { add, gear, view, update, admin })
+        foreach (var p in new Control[] { add, gear, update, admin })
         {
             if (!p.Visible) continue;
             x -= p.Width;
@@ -823,7 +930,7 @@ class MainForm : Form
         var g = e.Graphics;
         Draw.Smooth(g);
         int pad = S(14), cy = header.Height / 2;
-        int limit = new[] { add, gear, view, update, admin }.Where(p => p.Visible).Min(p => p.Left) - S(8);
+        int limit = new[] { add, gear, update, admin }.Where(p => p.Visible).Min(p => p.Left) - S(8);
         using var title = new Font("Segoe UI Semibold", 13f);
         int tw = Draw.Measure("TaskBoard", title);
         Draw.Text(g, "TaskBoard", title, new Rectangle(pad - S(3), cy - S(16), tw + S(4), S(32)), Theme.Text);
@@ -939,51 +1046,13 @@ class MainForm : Form
         finally { loading = false; }
     }
 
-    void Rebuild()
-    {
-        grid.SuspendLayout();
-        foreach (var c in cards.Values) c.Dispose();
-        cards.Clear();
-        grid.ResumeLayout();
-        Render();
-    }
-
-    // List rows span the window.
-    void SizeRows()
-    {
-        int w = Math.Max(grid.ClientSize.Width - grid.Padding.Horizontal - S(16) - (grid.VerticalScroll.Visible ? 0 : SystemInformation.VerticalScrollBarWidth), S(600));
-        foreach (var c in cards.Values) if (c.Width != w) c.Width = w;
-    }
-
     void Render()
     {
         var visible = last.Where(i => !settings.IsHidden(i)).ToList();
         counts = (visible.Count(i => i.Kind == "running"), visible.Count(i => i.Kind == "ok"), visible.Count(i => i.Kind == "fail"), last.Count - visible.Count);
         header.Invalidate();
 
-        if (!ListView) { tiles.SetItems(visible); return; }
-
-        var ids = visible.Select(i => i.Id).ToHashSet();
-        grid.SuspendLayout();
-        foreach (var gone in cards.Keys.Where(k => !ids.Contains(k)).ToList())
-        {
-            cards[gone].Dispose();
-            cards.Remove(gone);
-        }
-        for (int n = 0; n < visible.Count; n++)
-        {
-            var it = visible[n];
-            if (!cards.TryGetValue(it.Id, out var card))
-            {
-                card = cards[it.Id] = new Card(it.Id, true);
-                card.Act += OnAct;
-                grid.Controls.Add(card);
-            }
-            card.Bind(it, Icons.Get(it));
-            if (grid.Controls.GetChildIndex(card) != n) grid.Controls.SetChildIndex(card, n);
-        }
-        SizeRows();
-        grid.ResumeLayout();
+        tiles.SetItems(visible);
     }
 
     void OnAct(string id, string act)

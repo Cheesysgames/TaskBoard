@@ -664,6 +664,39 @@ static class SelfTest
             Check(merged.Single(m => m.Id == "service:Sonarr").Parts.Length == 2, "merged by name");
             Check(merged.Count(m => m.Name.StartsWith("Splashtop")) == 2 && merged.Single(m => m.Id == "task:\\JarvisServer").Parts == null, "no false merges");
 
+            // Your own groups: unplaced apps fall into type groups; moves, new groups, renames and deletes stick (and keep hidden apps).
+            var gs = new Settings();
+            var svc = P("service", "service:Plex", "Plex", @"C:\p.exe");
+            var son = P("service", "service:Sonarr", "Sonarr", @"C:\s.exe");
+            var job = P("task", "task:\\Backup", "Backup", @"C:\b.exe");
+            var tray = P("startup", "startup:hkcu|Discord", "Discord", @"C:\d.exe");
+            var all = new List<Item> { svc, son, job, tray };
+            var gl = Grouping.Build(all, gs.Groups);
+            Check(string.Join(",", gl.Select(g => g.Name)) == "Services,Scheduled tasks,Startup apps", "type groups");
+            Grouping.NewGroup(gs, gl, son.Id, "Media");
+            Grouping.Move(gs, gl, svc.Id, gl.FindIndex(g => g.Name == "Media"), 0);
+            gl = Grouping.Build(all, gs.Groups);
+            var media = gl.Single(g => g.Name == "Media");
+            Check(string.Join(",", media.Items.Select(i => i.Name)) == "Plex,Sonarr" && !gl.Any(g => g.Name == "Services"), "moved into new group: " + string.Join(",", gl.Select(g => g.Name)));
+            Grouping.Move(gs, gl, svc.Id, gl.IndexOf(media), 5);
+            gl = Grouping.Build(all, gs.Groups);
+            Check(string.Join(",", gl.Single(g => g.Name == "Media").Items.Select(i => i.Name)) == "Sonarr,Plex", "reorder");
+            // Plex gets hidden: it stays in Media's saved list while other moves happen
+            var shownNow = all.Where(i => i.Id != svc.Id).ToList();
+            gl = Grouping.Build(shownNow, gs.Groups);
+            Grouping.Rename(gs, gl, gl.FindIndex(g => g.Name == "Media"), "Movies & TV");
+            Grouping.Move(gs, gl, tray.Id, gl.FindIndex(g => g.Name == "Movies & TV"), 0);
+            Check(gs.Groups.Single(g => g.Name == "Movies & TV").Ids.Contains(svc.Id), "hidden app kept through rename/move");
+            gl = Grouping.Build(all, gs.Groups);
+            Grouping.Shift(gs, gl, gl.FindIndex(g => g.Name == "Scheduled tasks"), -1);
+            gl = Grouping.Build(all, gs.Groups);
+            Check(gl[0].Name == "Scheduled tasks", "move group up");
+            Grouping.Delete(gs, gl, gl.FindIndex(g => g.Name == "Movies & TV"));
+            gl = Grouping.Build(all, gs.Groups);
+            Check(!gl.Any(g => g.Name == "Movies & TV") && gl.Single(g => g.Name == "Services").Items.Count == 2 && gl.Any(g => g.Name == "Startup apps"), "delete group");
+            var back = System.Text.Json.JsonSerializer.Deserialize<Settings>(System.Text.Json.JsonSerializer.Serialize(gs));
+            Check(back.Groups.Select(g => g.Name).SequenceEqual(gs.Groups.Select(g => g.Name)), "groups saved");
+
             // Logo colour: a red logo tints red.
             using (var red = new Bitmap(32, 32)) { using (var rg = Graphics.FromImage(red)) rg.Clear(Color.FromArgb(220, 30, 40)); var c = Icons.Dominant(red, "x"); Check(c.R > 150 && c.G < 90 && c.B < 90, $"dominant {c}"); }
 
