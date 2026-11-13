@@ -1,4 +1,4 @@
-// TaskBoard: visual grid for Windows Task Scheduler, plus "Add server" to install new background apps.
+// TaskBoard: visual grid of background apps (Task Scheduler, services, startup apps), plus "Add server".
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text.RegularExpressions;
@@ -13,10 +13,21 @@ static class Program
     {
         if (args.Length > 0 && args[0] == "--selftest") return SelfTest.Run();
         if (args.Length > 0 && args[0] == "--update") return Updater.RunHeadless();
+        if (args.Length > 0 && args[0] == "--list") return ListToFile();
         Updater.Cleanup();
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
         return 0;
+    }
+
+    // TaskBoard.exe --list → board.txt next to the exe: everything the board would show (for troubleshooting).
+    static int ListToFile()
+    {
+        var (items, errors) = Board.Gather();
+        var lines = errors.Select(e => "ERROR " + e)
+            .Concat(items.Select(i => $"{i.Source,-8} {i.Label,-12} {i.Name}  [{string.Join(" | ", i.Rows.Select(r => r.Label + ": " + r.Value))}]  {i.Tip.Replace("\n", " ")}"));
+        File.WriteAllLines(Path.Combine(AppContext.BaseDirectory, "board.txt"), lines);
+        return errors.Count == 0 ? 0 : 1;
     }
 }
 
@@ -35,7 +46,7 @@ static class Sched
     static readonly Regex Hide = new(@"\\OneDrive |\\User_Feed_Synchronization|\\NVIDIA App|^\\GoogleUserPEH\\|^\\SoftLanding\\",
         RegexOptions.IgnoreCase);
 
-    static dynamic svc;
+    [ThreadStatic] static dynamic svc; // one per thread: the board refreshes in the background
     static dynamic Svc
     {
         get
@@ -360,10 +371,10 @@ static class Icons
 
     public static void Forget(string path) => cache.Remove(path);
 
-    public static Image Get(TaskInfo t)
+    public static Image Get(Item i)
     {
-        if (cache.TryGetValue(t.Path, out var img)) return img;
-        return cache[t.Path] = Custom(t.Name) ?? FromExe(Sched.IconExe(t)) ?? Letter(t.Name);
+        if (cache.TryGetValue(i.Id, out var img)) return img;
+        return cache[i.Id] = Custom(i.Name) ?? FromExe(i.IconExe) ?? Letter(i.Name);
     }
 
     static Image Custom(string name)
@@ -398,7 +409,7 @@ static class Icons
         g.FillEllipse(bg, 0, 0, 63, 63);
         using var font = new Font("Segoe UI Semibold", 26f, GraphicsUnit.Pixel);
         using var fg = new SolidBrush(Theme.Muted);
-        g.DrawString(name[..1].ToUpperInvariant(), font, fg, new RectangleF(0, 0, 64, 64),
+        g.DrawString(name == "" ? "?" : name[..1].ToUpperInvariant(), font, fg, new RectangleF(0, 0, 64, 64),
             new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
         return b;
     }
@@ -418,16 +429,18 @@ static class Icons
 class Card : Panel
 {
     public readonly string Id;
-    public event Action<string, string> Act; // (task path, action)
+    public event Action<string, string> Act; // (item id, action)
 
     static readonly Font FName = new("Segoe UI Semibold", 10.5f), FSmall = new("Segoe UI", 8.5f),
         FBody = new("Segoe UI", 9f), FStatus = new("Segoe UI Semibold", 9f);
     readonly PictureBox logo = new() { SizeMode = PictureBoxSizeMode.Zoom };
-    readonly Label name, folder, status, last, result, next;
-    readonly Button run, stop, toggle;
+    readonly Label name, group, status;
+    readonly Label[] keys = new Label[3], vals = new Label[3];
+    readonly Button run, stop, toggle, remove;
     readonly ToolTip tip = new();
+    readonly ToolStripMenuItem hideItem = new("Hide from board");
     Color accent = Theme.Off;
-    int state;
+    bool enabled, canDelete, isHidden;
 
     static int S(int px) => (int)Math.Round(px * MainForm.DpiScale);
     static Rectangle R(int x, int y, int w, int h) => new(S(x), S(y), S(w), S(h));
@@ -443,19 +456,24 @@ class Card : Panel
         logo.Bounds = R(16, 22, 40, 40);
         Controls.Add(logo);
         name = L(66, 20, 132, 22, FName, Theme.Text);
-        folder = L(66, 42, 132, 18, FSmall, Theme.Muted);
+        group = L(66, 42, 132, 18, FSmall, Theme.Muted);
         status = L(196, 22, 90, 20, FStatus, Theme.Text, ContentAlignment.MiddleRight);
-        L(16, 74, 90, 20, FBody, Theme.Muted).Text = "Last run";
-        L(16, 95, 90, 20, FBody, Theme.Muted).Text = "Result";
-        L(16, 116, 90, 20, FBody, Theme.Muted).Text = "Next run";
-        last = L(100, 74, 186, 20, FBody, Theme.Text, ContentAlignment.MiddleRight);
-        result = L(100, 95, 186, 20, FBody, Theme.Text, ContentAlignment.MiddleRight);
-        next = L(100, 116, 186, 20, FBody, Theme.Text, ContentAlignment.MiddleRight);
+        for (int i = 0; i < 3; i++)
+        {
+            keys[i] = L(16, 74 + i * 21, 90, 20, FBody, Theme.Muted);
+            vals[i] = L(100, 74 + i * 21, 186, 20, FBody, Theme.Text, ContentAlignment.MiddleRight);
+        }
 
         run = B("Run", 16, 62, "run");
         stop = B("Stop", 82, 62, "stop");
         toggle = B("Disable", 148, 74, "toggle");
-        B("Delete", 226, 60, "delete");
+        remove = B("Delete", 226, 60, "remove");
+
+        hideItem.Click += (_, _) => Act?.Invoke(Id, isHidden ? "unhide" : "hide");
+        var menu = new ContextMenuStrip();
+        menu.Items.Add(hideItem);
+        ContextMenuStrip = menu;
+        foreach (Control c in Controls) if (c is not Button) c.ContextMenuStrip = menu;
     }
 
     Label L(int x, int y, int w, int h, Font f, Color c, ContentAlignment a = ContentAlignment.MiddleLeft)
@@ -470,41 +488,42 @@ class Card : Panel
         var b = Theme.Btn(text);
         b.Bounds = R(x, 146, w, 28);
         b.Font = FBody;
-        b.Click += (_, _) => Act?.Invoke(Id, act == "toggle" ? (state == 1 ? "enable" : "disable") : act);
+        b.Click += (_, _) => Act?.Invoke(Id, act switch
+        {
+            "toggle" => enabled ? "disable" : "enable",
+            "remove" => canDelete ? "delete" : (isHidden ? "unhide" : "hide"),
+            _ => act,
+        });
         Controls.Add(b);
         return b;
     }
 
-    public void Bind(TaskInfo t, Image img)
+    public void Bind(Item it, Image img, bool hidden)
     {
-        state = t.State;
-        var (kind, label) = Sched.Status(t);
-        accent = Theme.Of(kind);
+        enabled = it.Enabled;
+        canDelete = it.CanDelete;
+        isHidden = hidden;
+        accent = Theme.Of(it.Kind);
         if (logo.Image != img) logo.Image = img;
-        name.Text = t.Name;
-        folder.Text = t.Folder;
-        status.Text = "● " + label;
+        name.Text = it.Name;
+        group.Text = hidden ? it.Group + " · hidden" : it.Group;
+        status.Text = "● " + it.Label;
         status.ForeColor = accent;
-        last.Text = Ago(t.LastRun);
-        result.Text = Sched.Describe(t.Result);
-        result.ForeColor = t.Result is 0 or 0x41301 ? Theme.Text : accent;
-        next.Text = Ago(t.NextRun);
-        run.Enabled = t.State == 3;
-        stop.Enabled = t.State == 4;
-        toggle.Text = t.State == 1 ? "Enable" : "Disable";
-        var info = string.IsNullOrEmpty(t.Description) ? t.Command : $"{t.Description}\n\n{t.Command}";
-        tip.SetToolTip(logo, info);
-        tip.SetToolTip(name, info);
+        for (int i = 0; i < 3; i++)
+        {
+            var r = i < it.Rows.Length ? it.Rows[i] : new Row("", "");
+            keys[i].Text = r.Label;
+            vals[i].Text = r.Value;
+            vals[i].ForeColor = r.Alert ? accent : Theme.Text;
+        }
+        run.Enabled = it.CanRun;
+        stop.Enabled = it.CanStop;
+        toggle.Text = it.Enabled ? "Disable" : "Enable";
+        remove.Text = it.CanDelete ? "Delete" : hidden ? "Unhide" : "Hide";
+        hideItem.Text = hidden ? "Unhide" : "Hide from board";
+        tip.SetToolTip(logo, it.Tip);
+        tip.SetToolTip(name, it.Tip);
         Invalidate();
-    }
-
-    static string Ago(DateTime? d)
-    {
-        if (d == null) return "—";
-        var s = (d.Value - DateTime.Now).TotalSeconds;
-        var a = Math.Abs(s);
-        var txt = a < 60 ? $"{a:0}s" : a < 3600 ? $"{a / 60:0}m" : a < 86400 ? $"{a / 3600:0}h" : $"{a / 86400:0}d";
-        return s < 0 ? txt + " ago" : "in " + txt;
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -526,8 +545,13 @@ class MainForm : Form
     readonly Dictionary<string, Card> cards = new();
     readonly System.Windows.Forms.Timer timer = new() { Interval = 3000 };
     readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 60 * 60 * 1000 };
-    readonly Button update = Theme.Btn("Update");
+    readonly Button update = Theme.Btn("Update"), showHidden = Theme.Btn("Show hidden");
+    readonly ComboBox filter = new() { DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+    static readonly string[] Filters = { "Everything", "Tasks", "Services", "Startup apps" };
     Updater.Release pending;
+    List<Item> last = new();
+    string actionError = "";
+    bool loading, showingHidden;
 
     static int S(int px) => (int)Math.Round(px * DpiScale);
     static Label Count(Color c) => new() { AutoSize = true, ForeColor = c, Margin = new Padding(0, 0, 16, 0) };
@@ -535,35 +559,48 @@ class MainForm : Form
     public MainForm()
     {
         DpiScale = DeviceDpi / 96f;
-        Text = "TaskBoard";
+        Text = Board.IsAdmin ? "TaskBoard (admin)" : "TaskBoard";
         Icon = Icons.AppIcon();
         Font = new Font("Segoe UI", 9f);
         BackColor = Theme.Bg;
         ForeColor = Theme.Text;
-        ClientSize = new Size(S(1000), S(640));
+        ClientSize = new Size(S(1100), S(680));
         StartPosition = FormStartPosition.CenterScreen;
 
         var header = new Panel { Dock = DockStyle.Top, Height = S(64), Padding = new Padding(S(24), S(14), S(24), S(14)) };
         var title = new Label { Text = "TaskBoard", Font = new Font("Segoe UI Semibold", 16f), AutoSize = true, Dock = DockStyle.Left };
         var counts = new FlowLayoutPanel { Dock = DockStyle.Left, AutoSize = true, WrapContents = false, Padding = new Padding(S(20), S(10), 0, 0) };
         counts.Controls.AddRange(new Control[] { nRunning, nOk, nFail });
-        var add = Theme.Btn("+  Add server");
-        add.Dock = DockStyle.Right;
-        add.Width = S(130);
-        add.Font = new Font("Segoe UI Semibold", 9.5f);
+
+        var add = HeaderBtn(Theme.Btn("+  Add server"), 120);
         add.Click += (_, _) => { using var f = new AddForm(); if (f.ShowDialog(this) == DialogResult.OK) Reload(); };
-        update.Dock = DockStyle.Right;
-        update.Width = S(150);
-        update.Font = new Font("Segoe UI Semibold", 9.5f);
+
+        var admin = HeaderBtn(Theme.Btn("Run as admin"), 115);
+        admin.Visible = !Board.IsAdmin;
+        new ToolTip().SetToolTip(admin, "Shows tasks set up by an administrator and lets you start/stop services.");
+        admin.Click += (_, _) => RestartAsAdmin();
+
+        HeaderBtn(showHidden, 130);
+        showHidden.Click += (_, _) => { showingHidden = !showingHidden; Render(); };
+
+        filter.Items.AddRange(Filters);
+        filter.SelectedIndex = 0;
+        filter.BackColor = Theme.Card;
+        filter.ForeColor = Theme.Text;
+        filter.Dock = DockStyle.Fill;
+        filter.SelectedIndexChanged += (_, _) => Render();
+        var filterBox = new Panel { Dock = DockStyle.Right, Width = S(120), Padding = new Padding(0, S(4), 0, 0) };
+        filterBox.Controls.Add(filter);
+
+        HeaderBtn(update, 150);
         update.ForeColor = Theme.Run;
         update.Visible = false;
         update.Click += async (_, _) => await ApplyUpdate();
-        var gap = new Panel { Dock = DockStyle.Right, Width = S(10) };
-        var version = new Label { Text = "v" + Updater.Current.ToString(3), AutoSize = true, Dock = DockStyle.Right, ForeColor = Theme.Muted, Padding = new Padding(0, S(10), S(12), 0) };
-        header.Controls.Add(version);
-        header.Controls.Add(update);
-        header.Controls.Add(gap);
-        header.Controls.Add(add);
+        var version = new Label { Text = "v" + Updater.Current.ToString(3), AutoSize = true, Dock = DockStyle.Right, ForeColor = Theme.Muted, Padding = new Padding(S(8), S(10), 0, 0) };
+
+        // Right-docked: first added sits furthest right.
+        foreach (var c in new Control[] { version, update, Gap(), add, Gap(), admin, Gap(), showHidden, Gap(), filterBox })
+            header.Controls.Add(c);
         header.Controls.Add(counts);
         header.Controls.Add(title);
 
@@ -580,7 +617,27 @@ class MainForm : Form
         Load += async (_, _) => { Theme.TitleBar(this); Reload(); timer.Start(); updateTimer.Start(); await CheckUpdate(); };
     }
 
-    // Quiet: a failed check (offline, no token) just leaves the button hidden.
+    Button HeaderBtn(Button b, int w)
+    {
+        b.Dock = DockStyle.Right;
+        b.Width = S(w);
+        b.Font = new Font("Segoe UI Semibold", 9.5f);
+        return b;
+    }
+
+    Panel Gap() => new() { Dock = DockStyle.Right, Width = S(8) };
+
+    void RestartAsAdmin()
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath) { UseShellExecute = true, Verb = "runas" });
+            Close();
+        }
+        catch (System.ComponentModel.Win32Exception) { } // said no to the UAC prompt
+    }
+
+    // Quiet: a failed check (offline, rate limited) just leaves the button hidden.
     async Task CheckUpdate()
     {
         try { pending = await Updater.Check(); } catch { return; }
@@ -601,19 +658,37 @@ class MainForm : Form
         }
         catch (Exception ex)
         {
-            error.Text = "Update failed: " + ex.Message;
+            actionError = "Update failed: " + ex.Message;
+            error.Text = actionError;
             update.Enabled = true;
             update.Text = $"Update to v{pending.Version.ToString(3)}";
         }
     }
 
-    void Reload()
+    // Reading services/processes takes a moment, so it happens off the UI thread.
+    async void Reload()
     {
-        List<TaskInfo> list;
-        try { list = Sched.List(); }
-        catch (Exception ex) { error.Text = "Could not read Task Scheduler: " + ex.Message; return; }
+        if (loading) return;
+        loading = true;
+        try
+        {
+            var (items, errors) = await Task.Run(Board.Gather);
+            last = items;
+            error.Text = actionError != "" ? actionError : errors.Count > 0 ? "Couldn't read " + string.Join("; ", errors) : "";
+            Render();
+        }
+        catch (Exception ex) { error.Text = "Refresh failed: " + ex.Message; }
+        finally { loading = false; }
+    }
 
-        var ids = list.Select(t => t.Path).ToHashSet();
+    void Render()
+    {
+        var source = new[] { null, "task", "service", "startup" }[Math.Max(filter.SelectedIndex, 0)];
+        int hiddenCount = last.Count(i => Board.Hidden.Contains(i.Id));
+        showHidden.Text = showingHidden ? "Hide hidden" : $"Show hidden ({hiddenCount})";
+        var list = last.Where(i => (source == null || i.Source == source) && (showingHidden || !Board.Hidden.Contains(i.Id))).ToList();
+
+        var ids = list.Select(i => i.Id).ToHashSet();
         foreach (var gone in cards.Keys.Where(k => !ids.Contains(k)).ToList())
         {
             cards[gone].Dispose();
@@ -621,46 +696,66 @@ class MainForm : Form
         }
 
         grid.SuspendLayout();
-        for (int i = 0; i < list.Count; i++)
+        for (int n = 0; n < list.Count; n++)
         {
-            var t = list[i];
-            if (!cards.TryGetValue(t.Path, out var card))
+            var it = list[n];
+            if (!cards.TryGetValue(it.Id, out var card))
             {
-                card = cards[t.Path] = new Card(t.Path);
+                card = cards[it.Id] = new Card(it.Id);
                 card.Act += OnAct;
                 grid.Controls.Add(card);
             }
-            card.Bind(t, Icons.Get(t));
-            grid.Controls.SetChildIndex(card, i);
+            card.Bind(it, Icons.Get(it), Board.Hidden.Contains(it.Id));
+            grid.Controls.SetChildIndex(card, n);
         }
         grid.ResumeLayout();
 
-        var kinds = list.Select(t => Sched.Status(t).Kind).ToList();
-        nRunning.Text = $"● {kinds.Count(k => k == "running")} running";
-        nOk.Text = $"● {kinds.Count(k => k == "ok")} ok";
-        nFail.Text = $"● {kinds.Count(k => k == "fail")} failed";
+        var visible = list.Where(i => !Board.Hidden.Contains(i.Id)).ToList();
+        nRunning.Text = $"● {visible.Count(i => i.Kind == "running")} running";
+        nOk.Text = $"● {visible.Count(i => i.Kind == "ok")} ok";
+        nFail.Text = $"● {visible.Count(i => i.Kind == "fail")} failed";
     }
 
-    void OnAct(string path, string act)
+    void OnAct(string id, string act)
     {
+        var it = last.FirstOrDefault(i => i.Id == id);
+        if (it == null) return;
+        var key = Board.Key(it);
         try
         {
             switch (act)
             {
-                case "run": Sched.Run(path); break;
-                case "stop": Sched.Stop(path); break;
-                case "enable": Sched.SetEnabled(path, true); break;
-                case "disable": Sched.SetEnabled(path, false); break;
+                case "hide": Board.SetHidden(id, true); break;
+                case "unhide": Board.SetHidden(id, false); break;
                 case "delete":
-                    if (MessageBox.Show(this, $"Remove \"{path.TrimStart('\\')}\" from Task Scheduler?\n\nThis doesn't stop it if it's running right now, and doesn't delete any files.",
-                            "Delete task", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-                    Sched.Delete(path);
-                    Icons.Forget(path);
+                    var what = it.Source == "task"
+                        ? $"Remove \"{key.TrimStart('\\')}\" from Task Scheduler?\n\nThis doesn't stop it if it's running right now, and doesn't delete any files."
+                        : $"Stop \"{it.Name}\" from starting at sign-in by removing its startup entry?\n\nThis doesn't stop it if it's running right now, and doesn't uninstall anything.";
+                    if (MessageBox.Show(this, what, "Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                    if (it.Source == "task") Sched.Delete(key); else Startup.Do(key, "delete");
+                    Icons.Forget(id);
+                    break;
+                default:
+                    if (it.Source == "service" && act == "disable" &&
+                        MessageBox.Show(this, $"Disable the \"{it.Name}\" service? It won't start until you enable it again.", "Disable service",
+                            MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                    switch (it.Source)
+                    {
+                        case "task":
+                            if (act == "run") Sched.Run(key);
+                            else if (act == "stop") Sched.Stop(key);
+                            else Sched.SetEnabled(key, act == "enable");
+                            break;
+                        case "service": Services.Do(key, act); break;
+                        case "startup": Startup.Do(key, act); break;
+                    }
                     break;
             }
-            error.Text = "";
+            actionError = "";
         }
-        catch (Exception ex) { error.Text = $"{act} failed: {ex.Message}"; }
+        catch (Exception ex) { actionError = $"{act} failed: {ex.Message}"; }
+        error.Text = actionError;
+        Render();
         Reload();
     }
 }
@@ -798,7 +893,7 @@ class AddForm : Form
                 var src = logo.Text.Trim();
                 File.Copy(src, Path.Combine(Icons.LogoDir, n + Path.GetExtension(src).ToLowerInvariant()), true);
             }
-            Icons.Forget("\\" + n);
+            Icons.Forget("task:\\" + n);
             if (start.Checked) Sched.Run("\\" + n);
             DialogResult = DialogResult.OK;
         }
@@ -853,6 +948,49 @@ static class SelfTest
             }
             finally { Sched.Delete("\\" + name); }
             Check(!Sched.Exists(name), "deleted");
+
+            // Command splitting for Run keys.
+            Check(Cmd.Split("\"C:\\Program Files\\Plex\\Plex Media Server.exe\" --x") == (@"C:\Program Files\Plex\Plex Media Server.exe", "--x"), "split quoted");
+            Check(Cmd.Split(@"C:\Program Files\Docker\Docker Desktop.exe") == (@"C:\Program Files\Docker\Docker Desktop.exe", ""), "split unquoted spaces");
+            Check(Cmd.Split(@"C:\a\b.exe -dataPath=x") == (@"C:\a\b.exe", "-dataPath=x"), "split args");
+            Check(Startup.IsOn(null) && Startup.IsOn(new byte[] { 2, 0 }) && Startup.IsOn(new byte[] { 6, 0 }) && !Startup.IsOn(new byte[] { 3, 0 }), "approved bytes");
+
+            // Process matching: interpreters need their script on the command line; launchers find the app they start.
+            var procs = new List<Proc>
+            {
+                new(1, @"C:\Program Files\nodejs\node.exe", "node \"C:\\pop\\api\\server.mjs\""),
+                new(2, @"C:\Program Files\nodejs\node.exe", "node C:\\other\\thing.js"),
+                new(3, @"C:\Users\x\Discord\app-1\Discord.exe", "Discord.exe"),
+                new(4, @"C:\Program Files\Plex\Plex Media Server.exe", ""),
+            };
+            Check(Procs.Match(@"C:\Program Files\nodejs\node.exe", "\"C:\\pop\\api\\server.mjs\"", procs).Single().Pid == 1, "match node script");
+            Check(Procs.Match(@"C:\Program Files\Plex\Plex Media Server.exe", "", procs).Single().Pid == 4, "match exe");
+            Check(Procs.Match(@"C:\Users\x\Discord\Update.exe", "--processStart Discord.exe", procs).Single().Pid == 3, "match launcher");
+            Check(Procs.Match(@"C:\pop\start.cmd", "", procs).Count == 0, "no false cmd match");
+
+            // Live read of every source, then a startup entry round trip in HKCU\...\Run.
+            var (items, errors) = Board.Gather();
+            Check(errors.Count == 0, "gather: " + string.Join("; ", errors));
+            Check(items.Any(i => i.Source == "task") && items.Any(i => i.Source == "startup"), "gather sources");
+            const string entry = "TaskBoard SelfTest";
+            using (var run = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
+                run.SetValue(entry, "\"C:\\Windows\\System32\\notepad.exe\" x");
+            try
+            {
+                var key = "hkcu|" + entry;
+                Check(Board.Gather().Items.Single(i => i.Id == "startup:" + key).Enabled, "startup listed");
+                Startup.Do(key, "disable");
+                Check(!Board.Gather().Items.Single(i => i.Id == "startup:" + key).Enabled, "startup disabled");
+                Startup.Do(key, "enable");
+                Check(Board.Gather().Items.Single(i => i.Id == "startup:" + key).Enabled, "startup enabled");
+                Startup.Do(key, "delete");
+                Check(!Board.Gather().Items.Any(i => i.Id == "startup:" + key), "startup deleted");
+            }
+            finally
+            {
+                using var run = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true);
+                run?.DeleteValue(entry, false);
+            }
 
             File.WriteAllText(log, "PASS");
             return 0;
