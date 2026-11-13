@@ -10,6 +10,6 @@
     <SelfContained>false</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <!-- Bumped by release.ps1; the updater compares this to the latest GitHub release tag. -->
-    <Version>1.1.1</Version>
+    <Version>1.2.0</Version>
   </PropertyGroup>
 </Project>
