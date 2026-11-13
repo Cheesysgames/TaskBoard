@@ -12,6 +12,8 @@ static class Program
     static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--selftest") return SelfTest.Run();
+        if (args.Length > 0 && args[0] == "--update") return Updater.RunHeadless();
+        Updater.Cleanup();
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm());
         return 0;
@@ -205,6 +207,119 @@ static class Sched
         < 0x10000 => $"Exit code {r}",
         _ => $"Error 0x{r:X}",
     };
+}
+
+// Self-update from GitHub Releases (repo is private, so it needs a token: see Token()).
+// release.ps1 publishes a release tagged vX.Y.Z with TaskBoard.exe attached.
+static class Updater
+{
+    const string Repo = "Cheesysgames/TaskBoard";
+    public record Release(Version Version, string AssetUrl);
+
+    public static Version Norm(Version v) => new(v.Major, v.Minor, Math.Max(v.Build, 0));
+    public static Version Current => Norm(typeof(Updater).Assembly.GetName().Version ?? new Version(0, 0));
+    public static Version ParseTag(string tag) =>
+        Version.TryParse((tag ?? "").Trim().TrimStart('v', 'V'), out var v) ? Norm(v) : null;
+
+    static string TokenFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TaskBoard", "github_token.txt");
+
+    // Env var, then %APPDATA%\TaskBoard\github_token.txt, then a logged-in GitHub CLI.
+    static string Token()
+    {
+        var t = Environment.GetEnvironmentVariable("TASKBOARD_GITHUB_TOKEN") ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+        if (!string.IsNullOrWhiteSpace(t)) return t.Trim();
+        try { if (File.Exists(TokenFile)) { t = File.ReadAllText(TokenFile).Trim(); if (t != "") return t; } } catch { }
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(Sched.Which("gh.exe"), "auth token")
+            { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+            using var p = System.Diagnostics.Process.Start(psi);
+            var output = p.StandardOutput.ReadToEnd().Trim();
+            if (p.WaitForExit(5000) && p.ExitCode == 0 && output != "") return output;
+        }
+        catch { }
+        return null;
+    }
+
+    static HttpClient Client()
+    {
+        var c = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
+        c.DefaultRequestHeaders.UserAgent.ParseAdd("TaskBoard-Updater");
+        var token = Token();
+        if (token == null) throw new Exception($"no GitHub token (sign in with `gh auth login` or put one in {TokenFile})");
+        c.DefaultRequestHeaders.Authorization = new("Bearer", token);
+        return c;
+    }
+
+    // Returns the newer release, or null when up to date.
+    public static async Task<Release> Check()
+    {
+        using var c = Client();
+        using var res = await c.GetAsync($"https://api.github.com/repos/{Repo}/releases/latest");
+        if (res.StatusCode == System.Net.HttpStatusCode.NotFound) return null; // no releases yet (or no access)
+        res.EnsureSuccessStatusCode();
+        using var doc = System.Text.Json.JsonDocument.Parse(await res.Content.ReadAsStringAsync());
+        var v = ParseTag(doc.RootElement.GetProperty("tag_name").GetString());
+        if (v == null || v <= Current) return null;
+        foreach (var a in doc.RootElement.GetProperty("assets").EnumerateArray())
+            if (a.GetProperty("name").GetString().Equals("TaskBoard.exe", StringComparison.OrdinalIgnoreCase))
+                return new Release(v, a.GetProperty("url").GetString());
+        return null;
+    }
+
+    // Windows lets a running exe be renamed, so: download → rename self to .old → move new in → restart.
+    public static async Task Apply(Release r)
+    {
+        var exe = Environment.ProcessPath;
+        var fresh = exe + ".new";
+        using (var c = Client())
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, r.AssetUrl);
+            req.Headers.Accept.ParseAdd("application/octet-stream");
+            using var res = await c.SendAsync(req); // redirect to the CDN drops the auth header, as it should
+            res.EnsureSuccessStatusCode();
+            var bytes = await res.Content.ReadAsByteArrayAsync();
+            if (bytes.Length < 10_000 || bytes[0] != 'M' || bytes[1] != 'Z') throw new Exception("download isn't a valid exe");
+            await File.WriteAllBytesAsync(fresh, bytes);
+        }
+        var old = exe + ".old";
+        if (File.Exists(old)) File.Delete(old);
+        File.Move(exe, old);
+        try { File.Move(fresh, exe); }
+        catch { File.Move(old, exe); throw; }
+    }
+
+    public static void Restart() =>
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath) { UseShellExecute = true });
+
+    // TaskBoard.exe --update → update.log next to the exe; exit 0 = updated or already current.
+    public static int RunHeadless()
+    {
+        var log = Path.Combine(AppContext.BaseDirectory, "update.log");
+        try
+        {
+            var r = Check().GetAwaiter().GetResult();
+            if (r == null) { File.WriteAllText(log, $"up to date (v{Current.ToString(3)})"); return 0; }
+            Apply(r).GetAwaiter().GetResult();
+            File.WriteAllText(log, $"updated v{Current.ToString(3)} -> v{r.Version.ToString(3)}");
+            return 0;
+        }
+        catch (Exception ex) { File.WriteAllText(log, "FAIL: " + ex.Message); return 1; }
+    }
+
+    // The previous exe may still be exiting for a moment after a restart.
+    public static void Cleanup()
+    {
+        var old = Environment.ProcessPath + ".old";
+        if (!File.Exists(old)) return;
+        Task.Run(async () =>
+        {
+            for (int i = 0; i < 20; i++)
+            {
+                try { File.Delete(old); return; } catch { await Task.Delay(500); }
+            }
+        });
+    }
 }
 
 static class Theme
@@ -410,6 +525,9 @@ class MainForm : Form
     readonly Label nRunning = Count(Theme.Run), nOk = Count(Theme.Ok), nFail = Count(Theme.Fail);
     readonly Dictionary<string, Card> cards = new();
     readonly System.Windows.Forms.Timer timer = new() { Interval = 3000 };
+    readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 60 * 60 * 1000 };
+    readonly Button update = Theme.Btn("Update");
+    Updater.Release pending;
 
     static int S(int px) => (int)Math.Round(px * DpiScale);
     static Label Count(Color c) => new() { AutoSize = true, ForeColor = c, Margin = new Padding(0, 0, 16, 0) };
@@ -434,6 +552,17 @@ class MainForm : Form
         add.Width = S(130);
         add.Font = new Font("Segoe UI Semibold", 9.5f);
         add.Click += (_, _) => { using var f = new AddForm(); if (f.ShowDialog(this) == DialogResult.OK) Reload(); };
+        update.Dock = DockStyle.Right;
+        update.Width = S(150);
+        update.Font = new Font("Segoe UI Semibold", 9.5f);
+        update.ForeColor = Theme.Run;
+        update.Visible = false;
+        update.Click += async (_, _) => await ApplyUpdate();
+        var gap = new Panel { Dock = DockStyle.Right, Width = S(10) };
+        var version = new Label { Text = "v" + Updater.Current.ToString(3), AutoSize = true, Dock = DockStyle.Right, ForeColor = Theme.Muted, Padding = new Padding(0, S(10), S(12), 0) };
+        header.Controls.Add(version);
+        header.Controls.Add(update);
+        header.Controls.Add(gap);
         header.Controls.Add(add);
         header.Controls.Add(counts);
         header.Controls.Add(title);
@@ -447,7 +576,35 @@ class MainForm : Form
         Controls.Add(header);
 
         timer.Tick += (_, _) => Reload();
-        Load += (_, _) => { Theme.TitleBar(this); Reload(); timer.Start(); };
+        updateTimer.Tick += async (_, _) => await CheckUpdate();
+        Load += async (_, _) => { Theme.TitleBar(this); Reload(); timer.Start(); updateTimer.Start(); await CheckUpdate(); };
+    }
+
+    // Quiet: a failed check (offline, no token) just leaves the button hidden.
+    async Task CheckUpdate()
+    {
+        try { pending = await Updater.Check(); } catch { return; }
+        update.Visible = pending != null;
+        if (pending != null) update.Text = $"Update to v{pending.Version.ToString(3)}";
+    }
+
+    async Task ApplyUpdate()
+    {
+        if (pending == null) return;
+        update.Enabled = false;
+        update.Text = "Updating…";
+        try
+        {
+            await Updater.Apply(pending);
+            Updater.Restart();
+            Close();
+        }
+        catch (Exception ex)
+        {
+            error.Text = "Update failed: " + ex.Message;
+            update.Enabled = true;
+            update.Text = $"Update to v{pending.Version.ToString(3)}";
+        }
     }
 
     void Reload()
@@ -659,6 +816,9 @@ static class SelfTest
         var log = Path.Combine(AppContext.BaseDirectory, "selftest.log");
         try
         {
+            Check(Updater.ParseTag("v1.2.0") == new Version(1, 2, 0) && Updater.ParseTag("1.2") == new Version(1, 2, 0)
+                && Updater.ParseTag("junk") == null, "parse tag");
+            Check(Updater.ParseTag("v1.10.0") > Updater.ParseTag("v1.9.3") && Updater.ParseTag("v" + Updater.Current) == Updater.Current, "version compare");
             Check(Sched.Describe(0) == "OK" && Sched.Describe(1) == "Exit code 1" && Sched.Describe(0x80070002) == "File not found", "describe");
             Check(Sched.Status(T(1, null, 0)).Kind == "off", "disabled");
             Check(Sched.Status(T(4, DateTime.Now, 0x41301)).Kind == "running", "running");

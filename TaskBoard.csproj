@@ -9,5 +9,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
+    <!-- Bumped by release.ps1; the updater compares this to the latest GitHub release tag. -->
+    <Version>1.1.0</Version>
   </PropertyGroup>
 </Project>
